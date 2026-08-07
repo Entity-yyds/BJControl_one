@@ -14,10 +14,12 @@ TEMPLATE = app
 SOURCES += \
     main.cpp \
     mainwindow.cpp\
+    saveparams.cpp \
     usbmanager.cpp
 
 HEADERS += \
     mainwindow.h \
+    saveparams.h \
     usbmanager.h
 
 FORMS += \

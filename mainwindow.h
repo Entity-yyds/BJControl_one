@@ -1,5 +1,7 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
+#include "usbmanager.h"
+#include "saveparams.h"
 
 #include <QMainWindow>
 #include <QTimer>
@@ -20,7 +22,7 @@
 #include <QLineEdit>
 #include <QGraphicsView>
 #include <QGraphicsScene>
-#include "usbmanager.h"
+#include <QSettings>
 
 class MainWindow : public QMainWindow
 {
@@ -71,6 +73,8 @@ private slots:
 private:
     // ========== USB管理 ==========
     UsbManager *usbManager;
+    // ========== 参数保存 ==========
+    SaveParams *saveParams;
 
     // ========== 打印状态 ==========
     enum PrintState {
@@ -85,30 +89,16 @@ private:
     // ========== 状态定时器 ==========
     QTimer *statusTimer;
 
-    // ========== 波形数据存储 ==========
-    struct WaveformData {
-        double voltage;     // 电压越高，压电晶体形变越大，喷射的液滴速度越快、体积越大
-        double riseTime;    // 上升时间，（波形上升斜率）控制压电晶体形变的速度
-        double dwellTime;   // 维持时间/脉冲宽度，电压保持在峰值的时间（单位：微秒 μs） 典型值：6 μs
-        double fallTime;    // 下降时间，电压从峰值下降到 0 所需的时间，控制压电晶体恢复形变的速度
-        double frequency;   // 每秒喷射的次数（单位：kHz，千赫兹），决定打印速度
-    } currentWaveform;
 
-    // ========== 运动参数存储 ==========
-    struct MotionParams {
-        double speedX;          // X轴速度 (mm/s)
-        double speedY;          // Y轴速度 (mm/s)
-        double speedZ;          // Z轴速度 (mm/s)
-        double acceleration;    // 加速度  (mm/s²)
-        double jerk;            // 加加速度 (mm/s³)
-        double layerHeight;     // 层厚    (mm)
-    } currentMotionParams;
-
-    // ========== 负压参数 ==========
-    struct NegativePressureParams {
-        double pressure;
-        bool enabled;
-    } currentNegativePressure;
+    // ========== 参数结构体（使用 saveparams.h 中定义的） ==========
+    MotionParams currentMotionParams;
+    WaveformData currentWaveform;
+    NegativePressureParams currentNegativePressure;
+    // ========== 负压参数 ==========   注意这种声明加定义
+//    struct NegativePressureParams {
+//        double pressure;
+//        bool enabled;
+//    } currentNegativePressure;
 
     // ========== 模拟数据 ==========
     double simulatedTemp;
@@ -206,6 +196,13 @@ private:
     void drawWaveformPreview();
     void drawPressureChart();
 
+    // ========== 数据持久化 ==========
+    void loadMotionParams();      // 加载运动参数
+    void saveMotionParams();      // 保存运动参数
+    void loadWaveformParams();    // 加载波形参数（预留）
+    void saveWaveformParams();    // 保存波形参数（预留）
+    void loadNegativePressure();  // 加载负压参数（预留）
+    void saveNegativePressure();  // 保存负压参数（预留
     // ========== 辅助函数 ==========
     QGroupBox* createGroupBox(const QString &title);
     void addWidgetToLayout(QLayout *layout, QWidget *widget, int row, int col, int rowSpan = 1, int colSpan = 1);

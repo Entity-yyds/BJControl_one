@@ -34,6 +34,7 @@
 MainWindow::MainWindow(QWidget *parent) // 初始化列表优点：在初始化列表中，C++ 会按声明顺序执行初始化
     : QMainWindow(parent)
     , usbManager(new UsbManager(this)) // UsbManager 会被添加到 Qt 对象树中，当 MainWindow 销毁时，UsbManager 会自动被删除，无需手动 delete
+    , saveParams(new SaveParams(this))
     , currentState(IDLE)            // 将打印状态初始化为"空闲"，表示打印机刚启动，还没有开始任何任务
     , simulatedTemp(25.0)           // 模拟温度初始化为 25°C（室温），后续会通过 updateStatus() 定时器模拟变化
     , simulatedPressure(-50.0)      // 模拟负压初始化为 -50 kPa（典型负压值），负压用于吸附粉床和回收未粘结的粉末
@@ -43,6 +44,11 @@ MainWindow::MainWindow(QWidget *parent) // 初始化列表优点：在初始化�
     setWindowTitle("Binder Jetting 3D Printer Controller");
     resize(1400, 900);
 
+    // ====== 加载保存的参数 ======
+    currentMotionParams = saveParams->loadMotionParams();
+    currentWaveform = saveParams->loadWaveformParams();
+    currentNegativePressure = saveParams->loadNegativePressure();
+    /*
     // 初始化默认参数
     currentWaveform.voltage = 45.0;
     currentWaveform.riseTime = 2.0;
@@ -59,7 +65,7 @@ MainWindow::MainWindow(QWidget *parent) // 初始化列表优点：在初始化�
 
     currentNegativePressure.pressure = -50.0;
     currentNegativePressure.enabled = false;
-
+    */
     // 创建UI
     setupUI();
 
@@ -95,6 +101,12 @@ MainWindow::MainWindow(QWidget *parent) // 初始化列表优点：在初始化�
 
     appendLog("程序已启动，等待连接设备...", "blue");
     appendLog("星光喷头 600DPI 控制就绪", "green");
+    appendLog(QString("已加载运动参数: X=%1, Y=%2, Z=%3, 层厚=%4mm")
+              .arg(currentMotionParams.speedX)
+              .arg(currentMotionParams.speedY)
+              .arg(currentMotionParams.speedZ)
+              .arg(currentMotionParams.layerHeight), "blue");
+    appendLog(QString("配置文件路径: %1").arg(saveParams->getConfigFilePath()), "blue");
 }
 
 MainWindow::~MainWindow()
@@ -558,7 +570,8 @@ void MainWindow::createMotionTab()
     paramLayout->addWidget(new QLabel("X轴速度:", this), 0, 0);                                                                                        // 标签放 (0, 0)
     spinSpeedX = new QDoubleSpinBox(this);      // ← 新增控件
     spinSpeedX->setRange(100, 2000);            // 控件与控件之间的空白
-    spinSpeedX->setValue(300);                  // 程序启动时的初始值
+    //spinSpeedX->setValue(300);                  // 程序启动时的初始值
+    spinSpeedX->setValue(currentMotionParams.speedX);
     spinSpeedX->setSuffix(" mm/s");             // 数值后面显示的单位
     spinSpeedX->setFixedWidth(150);             // 控件的宽度（不随窗口变化）
     paramLayout->addWidget(spinSpeedX, 0, 1);   // 将spinSpeedX 控件添加到网格布局 (spinSpeedX, 0, 1) (要添加的控件（浮点数输入框）, 放在第 0 行, 放在第 1 列)  // 输入框放 (0, 1)
@@ -568,7 +581,8 @@ void MainWindow::createMotionTab()
     paramLayout->addWidget(new QLabel("Y轴速度:", this), 1, 0);
     spinSpeedY = new QDoubleSpinBox(this);    // ← 新增控件
     spinSpeedY->setRange(100, 2000);
-    spinSpeedY->setValue(300);
+    //spinSpeedY->setValue(300);
+    spinSpeedY->setValue(currentMotionParams.speedY);
     spinSpeedY->setSuffix(" mm/s");
     spinSpeedY->setFixedWidth(150);
     paramLayout->addWidget(spinSpeedY, 1, 1);
@@ -577,7 +591,8 @@ void MainWindow::createMotionTab()
     paramLayout->addWidget(new QLabel("Z轴速度:", this), 2, 0);
     spinSpeedZ = new QDoubleSpinBox(this);
     spinSpeedZ->setRange(10, 200);
-    spinSpeedZ->setValue(50);
+    //spinSpeedZ->setValue(50);
+    spinSpeedZ->setValue(currentMotionParams.speedZ);
     spinSpeedZ->setSuffix(" mm/s");
     spinSpeedZ->setFixedWidth(150);
     paramLayout->addWidget(spinSpeedZ, 2, 1);
@@ -586,7 +601,8 @@ void MainWindow::createMotionTab()
     paramLayout->addWidget(new QLabel("加速度:", this), 3, 0);
     spinAcceleration = new QDoubleSpinBox(this);
     spinAcceleration->setRange(100, 5000);
-    spinAcceleration->setValue(1000);
+    //spinAcceleration->setValue(1000);
+    spinAcceleration->setValue(currentMotionParams.acceleration);
     spinAcceleration->setSuffix(" mm/s²");
     spinAcceleration->setFixedWidth(150);
     paramLayout->addWidget(spinAcceleration, 3, 1);
@@ -595,7 +611,8 @@ void MainWindow::createMotionTab()
     paramLayout->addWidget(new QLabel("Jerk:", this), 4, 0);
     spinJerk = new QDoubleSpinBox(this);
     spinJerk->setRange(1, 20);
-    spinJerk->setValue(5);
+    //spinJerk->setValue(5);
+    spinJerk->setValue(currentMotionParams.jerk);
     spinJerk->setSuffix(" mm/s³");
     spinJerk->setFixedWidth(150);
     paramLayout->addWidget(spinJerk, 4, 1);
@@ -605,7 +622,8 @@ void MainWindow::createMotionTab()
     spinLayerHeight = new QDoubleSpinBox(this);
     spinLayerHeight->setRange(0.02, 0.3);
     spinLayerHeight->setSingleStep(0.01);
-    spinLayerHeight->setValue(0.1);
+    //spinLayerHeight->setValue(0.1);
+    spinLayerHeight->setValue(currentMotionParams.layerHeight);
     spinLayerHeight->setSuffix(" mm");
     spinLayerHeight->setFixedWidth(150);
     paramLayout->addWidget(spinLayerHeight, 5, 1);
@@ -632,7 +650,7 @@ void MainWindow::createMotionTab()
     manualLayout->setSpacing(8);
     manualLayout->setContentsMargins(15, 20, 15, 15);
 
-    // X轴
+    // X轴 手动
     manualLayout->addWidget(new QLabel("X:", this), 0, 0);
     spinPosX = new QDoubleSpinBox(this);
     spinPosX->setRange(-500, 500);
@@ -641,7 +659,7 @@ void MainWindow::createMotionTab()
     spinPosX->setFixedWidth(150);
     manualLayout->addWidget(spinPosX, 0, 1);
 
-    // Y轴
+    // Y轴 手动
     manualLayout->addWidget(new QLabel("Y:", this), 1, 0);
     spinPosY = new QDoubleSpinBox(this);
     spinPosY->setRange(-500, 500);
@@ -650,7 +668,7 @@ void MainWindow::createMotionTab()
     spinPosY->setFixedWidth(150);
     manualLayout->addWidget(spinPosY, 1, 1);
 
-    // Z轴
+    // Z轴 手动
     manualLayout->addWidget(new QLabel("Z:", this), 2, 0);
     spinPosZ = new QDoubleSpinBox(this);
     spinPosZ->setRange(0, 400);
@@ -874,8 +892,8 @@ void MainWindow::on_btnEmergencyStop_clicked()
 void MainWindow::on_btnSetNegativePressure_clicked()
 {
     currentNegativePressure.pressure = spinNegativePressure->value();
+    saveParams->saveNegativePressure(currentNegativePressure);
     appendLog(QString("设置负压值: %1 kPa").arg(currentNegativePressure.pressure), "blue");
-
     if (usbManager->isConnected()) {
         QByteArray data;
         data.append(static_cast<char>(0x10));
@@ -887,6 +905,8 @@ void MainWindow::on_btnSetNegativePressure_clicked()
 void MainWindow::on_btnNegativePressureOn_clicked()
 {
     currentNegativePressure.enabled = true;
+    saveParams->saveNegativePressure(currentNegativePressure);
+
     btnNegativePressureOn->setEnabled(false);
     btnNegativePressureOff->setEnabled(true);
     labelNegativeStatus->setText("● 运行中");
@@ -901,6 +921,8 @@ void MainWindow::on_btnNegativePressureOn_clicked()
 void MainWindow::on_btnNegativePressureOff_clicked()
 {
     currentNegativePressure.enabled = false;
+    saveParams->saveNegativePressure(currentNegativePressure);
+
     btnNegativePressureOn->setEnabled(true);
     btnNegativePressureOff->setEnabled(false);
     labelNegativeStatus->setText("● 已关闭");
@@ -931,6 +953,8 @@ void MainWindow::on_btnApplyWaveform_clicked()
     currentWaveform.fallTime = spinFallTime->value();
     currentWaveform.frequency = spinFrequency->value();
 
+    // 保存波形参数
+    saveParams->saveWaveformParams(currentWaveform);
     appendLog(QString("应用波形: V=%1V, Rise=%2μs, Dwell=%3μs, Fall=%4μs, Freq=%5kHz")
               .arg(currentWaveform.voltage)
               .arg(currentWaveform.riseTime)
@@ -997,12 +1021,16 @@ void MainWindow::on_btnSetMotionParams_clicked()
     currentMotionParams.jerk = spinJerk->value();
     currentMotionParams.layerHeight = spinLayerHeight->value();
 
-    appendLog(QString("设置运动参数: X速度=%1mm/s, Y速度=%2mm/s, Z速度=%3mm/s, 加速度=%4mm/s²")
+    // 保存到文件
+    saveParams->saveMotionParams(currentMotionParams);
+    appendLog(QString("运动参数已保存: X速度=%1mm/s, Y速度=%2mm/s, Z速度=%3mm/s, 加速度=%4mm/s², Jerk=%5, 层厚=%6mm")
                   .arg(currentMotionParams.speedX)
                   .arg(currentMotionParams.speedY)
                   .arg(currentMotionParams.speedZ)
-                  .arg(currentMotionParams.acceleration), "blue");
-
+                  .arg(currentMotionParams.acceleration)
+                  .arg(currentMotionParams.jerk)
+                  .arg(currentMotionParams.layerHeight), "blue");
+    // 这里应该发送至plc或运动控制单元，不能发送至打印板卡
     if (usbManager->isConnected()) {
         QByteArray data;
         data.append(static_cast<char>(0x30));

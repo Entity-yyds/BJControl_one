@@ -17,6 +17,7 @@ UsbManager::UsbManager(QObject *parent)
 
 UsbManager::~UsbManager()
 {
+    qDebug() << "    -> USBdisconnectDevice";
     disconnectDevice();
     if (simulateTimer) {
         delete simulateTimer;
