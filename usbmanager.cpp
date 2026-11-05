@@ -1,51 +1,40 @@
 #include "usbmanager.h"
-#include "mainwindow.h"
-#include <QDebug>
-#include <QTimer>
-#include <QDateTime>
+#include <QMetaObject>
 
 UsbManager::UsbManager(QObject *parent)
     : QObject(parent)           // ← 这里要调用父类构造函数
     , m_connected(false)
-    , simulateTimer(nullptr)
+    , workerThread(new QThread(this))
+    , worker(new USBWorker())
 {
-    // 初始化模拟定时器
-    simulateTimer = new QTimer(this);
-    simulateTimer->setInterval(100);
-    connect(simulateTimer, &QTimer::timeout, this, &UsbManager::simulateData);
+    worker->moveToThread(workerThread);
+    connect(workerThread, &QThread::finished, worker, &QObject::deleteLater);
+    connect(worker, &USBWorker::connected, this, &UsbManager::handleConnected);
+    connect(worker, &USBWorker::disconnected, this, &UsbManager::handleDisconnected);
+    connect(worker, &USBWorker::dataReceived, this, &UsbManager::dataReceived);
+    connect(worker, &USBWorker::dataSent, this, &UsbManager::handleDataSent);
+    connect(worker, &USBWorker::error, this, &UsbManager::errorOccurred);
+    connect(worker, &USBWorker::testFinished, this, &UsbManager::testFinished);
+    workerThread->start();
 }
 
 UsbManager::~UsbManager()
 {
-    qDebug() << "    -> USBdisconnectDevice";
-    disconnectDevice();
-    if (simulateTimer) {
-        delete simulateTimer;
-        simulateTimer = nullptr;
-    }
+    if (workerThread->isRunning())
+        disconnectDevice();
+    workerThread->quit();
+    workerThread->wait();
 }
 
 bool UsbManager::connectDevice(const QString &portName)
 {
     Q_UNUSED(portName);
-    // TODO: 实现实际的USB连接
-    // 模拟连接
-    m_connected = true;
-    m_deviceInfo = "BJ Printer Driver Board v1.0";
-    if (simulateTimer) {
-        simulateTimer->start();
-    }
-    emit statusChanged(true);
-    return true;
+    return QMetaObject::invokeMethod(worker, "connectDevice", Qt::QueuedConnection);    // 通过 QMetaObject::invokeMethod 发到 worker 线程
 }
 
 void UsbManager::disconnectDevice()
 {
-    m_connected = false;
-    if (simulateTimer) {
-        simulateTimer->stop();
-    }
-    emit statusChanged(false);
+    QMetaObject::invokeMethod(worker, "disconnectDevice", Qt::BlockingQueuedConnection);
 }
 
 bool UsbManager::isConnected() const
@@ -56,27 +45,22 @@ bool UsbManager::isConnected() const
 bool UsbManager::sendCommand(uint8_t cmd, const QByteArray &data)
 {
     if (!m_connected) return false;
-    // TODO: 实现命令发送
-    Q_UNUSED(cmd);
-    Q_UNUSED(data);
-    return true;
+    QByteArray packet(1, static_cast<char>(cmd));
+    packet.append(data);
+    return sendData(packet);
 }
 
 bool UsbManager::sendData(const QByteArray &data)
 {
     if (!m_connected) return false;
-    // TODO: 实现数据发送
-    //qDebug() << "Sending data:" << data.toHex();
-    return true;
+    return QMetaObject::invokeMethod(worker, "sendData", Qt::QueuedConnection,
+                                     Q_ARG(QByteArray, data));
 }
 
 QStringList UsbManager::getAvailableDevices() const
 {
-    // TODO: 实现设备枚举
-    // 模拟返回设备列表
     QStringList devices;
-    devices << "BJ-Driver-001 (USB3.0)";
-    devices << "BJ-Driver-002 (USB3.0)";
+    devices << "FX3 (VID 0x04b4, PID 0x00f1)";
     return devices;
 }
 
@@ -85,19 +69,8 @@ QString UsbManager::getDeviceInfo() const
     return m_deviceInfo;
 }
 
-void UsbManager::handleDeviceReadyRead()
-{
-    // TODO: 处理设备数据读取
-}
-
-void UsbManager::simulateData()
-{
-    // 模拟数据接收（仅用于演示）
-    if (m_connected) {
-        QByteArray fakeData;
-        fakeData.append(static_cast<char>(0x80)); // 状态包
-        fakeData.append(static_cast<char>(0x01));
-        fakeData.append(static_cast<char>(0x00));
-        emit dataReceived(fakeData);
-    }
-}
+void UsbManager::testCommunication() { QMetaObject::invokeMethod(worker, "testCommunication", Qt::QueuedConnection); }
+void UsbManager::handleDeviceReadyRead() {}
+void UsbManager::handleConnected(bool success, const QString &info) { m_connected = success; m_deviceInfo = info; emit statusChanged(success); }
+void UsbManager::handleDisconnected() { m_connected = false; emit statusChanged(false); }
+void UsbManager::handleDataSent(int) {}

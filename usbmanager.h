@@ -4,7 +4,10 @@
 #include <QObject>
 #include <QByteArray>
 #include <QString>
-#include <QTimer>
+#include <QStringList>
+#include <QThread>
+#include <cstdint>
+#include "usbworker.h"
 
 class UsbManager : public QObject
 {
@@ -23,6 +26,7 @@ public:
     // 数据发送
     bool sendCommand(uint8_t cmd, const QByteArray &data = QByteArray());
     bool sendData(const QByteArray &data);
+    void testCommunication();
 
     // 获取设备列表
     QStringList getAvailableDevices() const;
@@ -34,22 +38,20 @@ signals:
     void statusChanged(bool connected);
     void dataReceived(const QByteArray &data);
     void errorOccurred(const QString &error);
+    void testFinished(bool success);
 
 private slots:
     void handleDeviceReadyRead();
+    void handleConnected(bool success, const QString &info);
+    void handleDisconnected();
+    void handleDataSent(int bytes);
 
 private:
     bool m_connected;
     QString m_deviceInfo;
 
-    // 后期添加实际的USB通信对象
-    //QSerialPort *serialPort;    // 如果使用串口
-    // QUsbDevice *usbDevice;   // 如果使用QtUsb
-
-    // 模拟数据定时器（仅用于演示）
-    QTimer *simulateTimer;
-
-    void simulateData();
+    QThread *workerThread;
+    USBWorker *worker;
 };
 
 #endif // USBMANAGER_H

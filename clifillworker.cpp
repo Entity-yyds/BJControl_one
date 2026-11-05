@@ -1,0 +1,115 @@
+#include "clifillworker.h"
+#include "cli_fill2.h"
+#include "binrowoffset.h"
+#include <QFile>
+#include <QImage>
+
+CliFillWorker::CliFillWorker(const QString &inputPath, const QString &outputPath,
+                             double dpi, QObject *parent)
+    : QObject(parent), inputPath(inputPath), outputPath(outputPath), dpi(dpi)
+{
+}
+
+// 从 2bpp 数据生成灰度 png（8 位灰度：0=白背景, 1=黑, 2/3=灰阶）
+static bool save2bppPng(const QByteArray &rot, int width, int height, int rowBytes,
+                        const QString &pngPath)
+{
+    if (width <= 0 || height <= 0 || rowBytes <= 0) return false;
+    QImage img(width, height, QImage::Format_Grayscale8);
+    img.fill(255);
+    const int dataSize = rowBytes * height;
+    for (int y = 0; y < height; ++y) {
+        uchar *line = img.scanLine(y);
+        const int rowStart = y * rowBytes;
+        for (int x = 0; x < width; ++x) {
+            const int byteIdx = rowStart + x / 4;
+            const uchar v = (byteIdx < dataSize && byteIdx < rot.size())
+                ? (static_cast<uchar>(rot.at(byteIdx)) >> (6 - (x % 4) * 2)) & 0x03
+                : 0;
+            line[x] = v == 0 ? 255 : static_cast<uchar>(255 - v * 85);
+        }
+    }
+    return img.save(pngPath);
+}
+
+/*
+ * 对单层 .bin 做星光喷头后处理：排偏移(applyRowOffset2bpp) → 90°逆时针旋转(rotate90ccw2bpp)。
+ *
+ * 命名规则：
+ *   layer_XXX.bin       = CLI 填充后的原始切片（保留不变，UI 层预览读它）
+ *   layer_XXX.tmp.bin   = 后处理结果（偏移+旋转，供打印发送）
+ *   layer_XXX.tmp.png   = 后处理结果的可视化预览图
+ *
+ * 后处理不覆盖/不改名原始 .bin，两者独立并存。
+ */
+static bool postProcessLayerBin(const QString &dir, int layerIdx,
+                                int width, int height, int rowBytes)
+{
+    const QString binPath = dir + QString("/layer_%1.bin").arg(layerIdx, 3, 10, QChar('0'));
+
+    QFile in(binPath);
+    if (!in.open(QIODevice::ReadOnly)) return false;
+    const QByteArray src = in.readAll();
+    in.close();
+    if (src.size() < rowBytes * height) return false;
+
+    // 1) 排偏移 + 每1024行分组重排（末节补0）：
+    //    统一画布宽 = maxOffset + width；高 = ceil(height/1024)*1024
+    int maxOffset = 0;
+    const QVector<int> &offs = xingguangRankOffsets();
+    for (int o : offs) maxOffset = qMax(maxOffset, o);
+
+    QByteArray off;
+    int offRowBytes = 0;
+    if (!applyRowOffset2bpp(src, width, height, rowBytes, offs, off, offRowBytes))
+        return false;
+
+    // 补0后的实际行数（applyRowOffset 的输出高度，不再等于原 height）
+    const int offHeight = off.size() / offRowBytes;
+
+    // 2) 90° 逆时针旋转：宽 = offHeight，高 = 原宽 + maxOffset
+    QByteArray rot;
+    int rotRowBytes = 0;
+    if (!rotate90ccw2bpp(off, width + maxOffset, offHeight, offRowBytes, rot, rotRowBytes))
+        return false;
+
+    // 3) 后处理结果独立命名 layer_XXX.tmp.bin（不覆盖原始 .bin）
+    const QString tmpPath = dir + QString("/layer_%1.tmp.bin").arg(layerIdx, 3, 10, QChar('0'));
+    QFile out(tmpPath);
+    if (!out.open(QIODevice::WriteOnly)) return false;
+    out.write(rot);
+    out.close();
+
+    // 4) 由后处理结果生成 png 预览图（宽=offHeight，高=原宽+maxOffset）
+    save2bppPng(rot, offHeight, width + maxOffset, rotRowBytes,
+                dir + QString("/layer_%1.tmp.png").arg(layerIdx, 3, 10, QChar('0')));
+    return true;
+}
+
+void CliFillWorker::run()
+{
+    CliFillResult result = {};
+    const QByteArray input = QFile::encodeName(inputPath);
+    const QByteArray output = QFile::encodeName(outputPath);
+    const int status = cli_fill2_convert(input.constData(), output.constData(), dpi, &result);
+
+    // ===== .bin 后处理：星光喷头排偏移 + 90°逆时针旋转 =====
+    // 命名规则：
+    //   layer_XXX.bin     = CLI 填充后的原始切片（保留不变，UI 层预览读它）
+    //   layer_XXX.tmp.bin = 后处理结果（偏移+旋转，供打印发送）
+    //   layer_XXX.tmp.png = 后处理结果的可视化预览图
+    if (status == 0 && result.layer_count > 0 && result.width > 0 && result.height > 0) {
+        const int rawW = result.width;      // 原始画布宽（像素）
+        const int rawH = result.height;     // 原始画布高（像素）
+        const int rawRB = result.row_bytes; // 原始每行字节数 = ceil(rawW/4)
+
+        // 逐层生成 tmp.bin + tmp.png（原始 layer_XXX.bin 保持不变，供 UI 预览）
+        for (int i = 1; i <= result.layer_count; ++i) {
+            postProcessLayerBin(outputPath, i, rawW, rawH, rawRB);
+        }
+        // result 保持 cli_fill2 返回的原始尺寸：预览读的是 layer_XXX.bin（原始切片）
+    }
+
+    emit finished(status, result.layer_count, result.width, result.height, result.row_bytes);
+}
+//（注：内容由AI生成）

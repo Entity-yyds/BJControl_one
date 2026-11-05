@@ -1,8 +1,9 @@
-QT       += core gui
+QT       += core gui network
 
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
 CONFIG += c++11
+DEFINES += CLI_FILL2_NO_MAIN
 
 TARGET = BJPrinterControl
 TEMPLATE = app
@@ -15,19 +16,31 @@ SOURCES += \
     main.cpp \
     mainwindow.cpp\
     saveparams.cpp \
-    usbmanager.cpp
+    usbmanager.cpp \
+    fx3communicator.cpp \
+    usbworker.cpp \
+    vacuumcontroller.cpp \
+    cli_fill2.c \
+    clifillworker.cpp\
+    binrowoffset.cpp
 
 HEADERS += \
     mainwindow.h \
     saveparams.h \
-    usbmanager.h
+    usbmanager.h \
+    fx3communicator.h \
+    usbworker.h \
+    vacuumcontroller.h \
+    cli_fill2.h \
+    clifillworker.h\
+    binrowoffset.h
 
 FORMS += \
     mainwindow.ui
 
 # 如果需要libusb或QtUsb，添加对应的库
-# unix: LIBS += -lusb-1.0
-# win32: LIBS += -lwinusb
+unix: LIBS += -lusb-1.0 -lpthread
+win32: LIBS += -lusb-1.0
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin
