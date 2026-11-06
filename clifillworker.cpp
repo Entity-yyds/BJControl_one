@@ -44,27 +44,33 @@ static bool save2bppPng(const QByteArray &rot, int width, int height, int rowByt
  *   layer_XXX.tmp.png   = 后处理结果的可视化预览图
  *
  * 后处理不覆盖/不改名原始 .bin，两者独立并存。
+ * dir ：切片输出目录
+ * ayerIdx ：第几层，从 1 开始
+ * cli_fill2_convert： 返回的原始画布尺寸 width/height/rowBytes
  */
 static bool postProcessLayerBin(const QString &dir, int layerIdx,
                                 int width, int height, int rowBytes)
-{
-    const QString binPath = dir + QString("/layer_%1.bin").arg(layerIdx, 3, 10, QChar('0'));
+{   // CLI 输出文件命名的规则
+    const QString binPath = dir + QString("/layer_%1.bin").arg(layerIdx, 3, 10, QChar('0'));    // 拼出要读的原始切片路径 `layerIdx`：要格式化的数字 `3`：**最少宽度 3 位** `10`：十进制 `QChar('0')`：不足位用 `'0'` 补
 
-    QFile in(binPath);
+    QFile in(binPath);      // 打开原始 `.bin`，打不开直接 false
     if (!in.open(QIODevice::ReadOnly)) return false;
-    const QByteArray src = in.readAll();
-    in.close();
-    if (src.size() < rowBytes * height) return false;
+    const QByteArray src = in.readAll();        // 一次性把整个 `.bin` 读进内存。这一层 2bpp 数据可能几 MB，一次读完最简单。
+    in.close();                                 //     读完立刻 `close()`，不占着文件句柄。
+    if (src.size() < rowBytes * height) return false;   // **尺寸校验**：读到的字节数至少要够 `rowBytes × height` 多了不管（可能有尾部填充
 
     // 1) 排偏移 + 每1024行分组重排（末节补0）：
     //    统一画布宽 = maxOffset + width；高 = ceil(height/1024)*1024
-    int maxOffset = 0;
-    const QVector<int> &offs = xingguangRankOffsets();
+    int maxOffset = 0;              // 遍历一遍取最大值 → `maxOffset = 416`
+    const QVector<int> &offs = xingguangRankOffsets();          // `xingguangRankOffsets()` 返回那个硬编码数组 `{0, 24, 88, 112, 306, 328, 392, 416}`；
     for (int o : offs) maxOffset = qMax(maxOffset, o);
 
     QByteArray off;
     int offRowBytes = 0;
-    if (!applyRowOffset2bpp(src, width, height, rowBytes, offs, off, offRowBytes))
+    // 输入：原始数据 `src` + 原始尺寸 + 8 个排偏移
+    // 输出：新的 2bpp 数据 `off` + 新的每行字节数 `offRowBytes`
+    // 这一步做的事情：每 1024 行一组，节内按喷孔排把行重新排列，行首补该排偏移像素
+    if (!applyRowOffset2bpp(src, width, height, rowBytes, offs, off, offRowBytes))  // 输入：原始数据 `src` + 原始尺寸 + 8 个排偏移
         return false;
 
     // 补0后的实际行数（applyRowOffset 的输出高度，不再等于原 height）
@@ -77,7 +83,7 @@ static bool postProcessLayerBin(const QString &dir, int layerIdx,
         return false;
 
     // 3) 后处理结果独立命名 layer_XXX.tmp.bin（不覆盖原始 .bin）
-    const QString tmpPath = dir + QString("/layer_%1.tmp.bin").arg(layerIdx, 3, 10, QChar('0'));
+    const QString tmpPath = dir + QString("/layer_%1_tmp.bin").arg(layerIdx, 3, 10, QChar('0'));
     QFile out(tmpPath);
     if (!out.open(QIODevice::WriteOnly)) return false;
     out.write(rot);
@@ -85,7 +91,7 @@ static bool postProcessLayerBin(const QString &dir, int layerIdx,
 
     // 4) 由后处理结果生成 png 预览图（宽=offHeight，高=原宽+maxOffset）
     save2bppPng(rot, offHeight, width + maxOffset, rotRowBytes,
-                dir + QString("/layer_%1.tmp.png").arg(layerIdx, 3, 10, QChar('0')));
+                dir + QString("/layer_%1_tmp.png").arg(layerIdx, 3, 10, QChar('0')));
     return true;
 }
 
