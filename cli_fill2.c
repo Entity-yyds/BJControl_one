@@ -764,6 +764,15 @@ int cli_fill2_convert(const char *input_path, const char *outdir, double dpi,
     G_ymin = 1e30; G_ymax = -1e30;
     g_bin_little_endian = 0;
 
+    /* status,含义（对应 cli_fill2.c 里的 return）
+     * 0,成功，result 已填好
+     * -1,参数非法或 cli_parse 失败（打不开文件 / 不是合法 CLI）
+     * -2,解析出 0 层
+     * -3,包围盒退化（xmin>=xmax）
+     * -4,process_layer 写 .bin 失败
+     * -5,位图太大（>2 亿像素）
+     * -6,所有层都是空的，没产出任何 .bin
+     */
     if (cli_parse(input_path, &doc) != 0) return -1;
     if (doc.n_layers == 0) {
         cli_free(&doc);

@@ -6,7 +6,10 @@
 
 CliFillWorker::CliFillWorker(const QString &inputPath, const QString &outputPath,
                              double dpi, QObject *parent)
-    : QObject(parent), inputPath(inputPath), outputPath(outputPath), dpi(dpi)
+    : QObject(parent)
+    , inputPath(inputPath)
+    , outputPath(outputPath)
+    , dpi(dpi)
 {
 }
 
@@ -88,8 +91,8 @@ static bool postProcessLayerBin(const QString &dir, int layerIdx,
 
 void CliFillWorker::run()
 {
-    CliFillResult result = {};
-    const QByteArray input = QFile::encodeName(inputPath);
+    CliFillResult result = {};      // 是 C++ 值初始化，把它们全部清
+    const QByteArray input = QFile::encodeName(inputPath);      // 转成 `const char*` 给 C 函数用 防止误改
     const QByteArray output = QFile::encodeName(outputPath);
     const int status = cli_fill2_convert(input.constData(), output.constData(), dpi, &result);
 
@@ -98,7 +101,7 @@ void CliFillWorker::run()
     //   layer_XXX.bin     = CLI 填充后的原始切片（保留不变，UI 层预览读它）
     //   layer_XXX.tmp.bin = 后处理结果（偏移+旋转，供打印发送）
     //   layer_XXX.tmp.png = 后处理结果的可视化预览图
-    if (status == 0 && result.layer_count > 0 && result.width > 0 && result.height > 0) {
+    if (status == 0 && result.layer_count > 0 && result.width > 0 && result.height > 0) {   // 只有 "切片真的成功了" 才做后处理
         const int rawW = result.width;      // 原始画布宽（像素）
         const int rawH = result.height;     // 原始画布高（像素）
         const int rawRB = result.row_bytes; // 原始每行字节数 = ceil(rawW/4)
@@ -109,7 +112,10 @@ void CliFillWorker::run()
         }
         // result 保持 cli_fill2 返回的原始尺寸：预览读的是 layer_XXX.bin（原始切片）
     }
-
+    // 接收端是 onCliConversionFinished `status != 0` → 弹窗报错； `status == 0` → 写 `meta.txt`，`applySliceResult` 刷新预览
+    // 同时 触发 `QThread::finished` → `quit` → 线程退出
     emit finished(status, result.layer_count, result.width, result.height, result.row_bytes);
 }
-//（注：内容由AI生成）
+
+
+

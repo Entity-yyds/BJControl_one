@@ -2018,17 +2018,16 @@ void MainWindow::on_btnOpenCli_clicked()          // 第1951行：只保留选�
     openCliFile(fileName);
 }
 
-
+// 打开cli文件
 void MainWindow::openCliFile(const QString &fileName)   // 第1961行：新函数，含原主体
 {
     appendLog(QString("打开CLI文件: %1").arg(fileName), "blue");
     labelCliFile->setText(QString("模型: %1").arg(QFileInfo(fileName).fileName()));
 
-    // ===== 记住上次打开的CLI文件，下次启动自动打开 =====   // 第1966行：唯一新增逻辑
-    saveParams->saveLastCliFile(fileName);                 // 第1967行
+    // ===== 记住上次打开的CLI文件，下次启动自动打开 =====
+    saveParams->saveLastCliFile(fileName);
     // ===== 切片缓存目录：按文件名+大小命名，避免重复切片 =====
     // 末尾 _binv3：排偏移改为"每1024行分组、末节补0"后，bin 画布高度已变，
-    // 加版本号使旧格式缓存(_binv2: 整体分组 / 未分组)失效，避免命中后尺寸不匹配。
     QFileInfo fi(fileName);
     QString cacheDir = QDir::homePath() + "/.cache/BJPrinter/slices/";
     //QString cacheName = fi.completeBaseName() + "_" + QString::number(fi.size());
@@ -2040,7 +2039,7 @@ void MainWindow::openCliFile(const QString &fileName)   // 第1961行：新函�
     QDir dir(sliceDir);
     if (dir.exists("layer_001.bin") && dir.exists("meta.txt")) {
         int layerCount = 0, width = 0, height = 0, rowBytes = 0;
-        int origW = 0, origH = 0, procW = 0, procH = 0;   // ← 新增行1
+        int origW = 0, origH = 0, procW = 0, procH = 0;   // ← 新元数据长宽
         QFile metaFile(sliceDir + "/meta.txt");
         if (metaFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
             QTextStream in(&metaFile);
@@ -2126,8 +2125,6 @@ void MainWindow::onCliConversionFinished(int status, int layerCount, int width,
         appendLog(detail, "red");
         return;
     }
-
-    // ===== 把切片元数据落盘，供下次"缓存命中"恢复界面 =====
     // ===== 把切片元数据落盘，供下次"缓存命中"恢复界面 =====
     // 格式（纯数字，流式读取，向后兼容旧缓存）：          ← 注释
     //   layerCount / width / height / rowBytes           ← 注释
@@ -3539,5 +3536,5 @@ void MainWindow::writeToLogFile(const QString &msg)
         m_logStream->flush();
     }
 }
-//（注：内容由AI生成）
+
 
