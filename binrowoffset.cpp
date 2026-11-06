@@ -6,30 +6,38 @@ const QVector<int>& xingguangRankOffsets()
     static const QVector<int> offs = {0, 24, 88, 112, 306, 328, 392, 416};
     return offs;
 }
+/*
+ * `src`：原始 2bpp 数据（来自 `layer_001.bin`）
+ * `width/height/srcRowBytes`：原始画布尺寸
+ * `rankOffsets`：8 个排的横向偏移像素数 `{0,24,88,112,306,328,392,416}`
+ * `out/outRowBytes`：输出参数（引用带回）
+ * `swathRows = 1024`：一节多少行，默认 1024
+*/
 
 bool applyRowOffset2bpp(const QByteArray &src, int width, int height, int srcRowBytes,
                         const QVector<int> &rankOffsets,
                         QByteArray &out, int &outRowBytes, int swathRows)
 {
+    // 入参校验 偏移表不能为空 偏移表不能为空
     if (rankOffsets.isEmpty() || width <= 0 || height <= 0 || srcRowBytes <= 0)
         return false;
     if (swathRows <= 0) swathRows = 1024;
     if (src.size() < srcRowBytes * height)
         return false;
-
+    // 扫一遍偏移表取最大值 = 416。后面输出画布宽要按这个最大值扩
     int maxOffset = 0;
     for (int o : rankOffsets)
         maxOffset = qMax(maxOffset, o);
 
-    const int outWidth  = maxOffset + width;   // 统一画布宽
-    outRowBytes = (outWidth + 3) / 4;
+    const int outWidth  = maxOffset + width;    // 统一画布宽
+    outRowBytes = (outWidth + 3) / 4;           // 输出每行字节数 = 4 像素一字节，向上取整
 
-    const int rankCount = rankOffsets.size();
+    const int rankCount = rankOffsets.size();   // = 8
     // ===== 真实喷孔→排映射（替代原来的 row%8 占位）=====
     // 喷孔号 % 8 决定属于哪一排（每排128孔、间隔8）。
     // 依据：排1=8,16..1024(≡0)  排2=4(≡4)  排3=7(≡7)  排4=3(≡3)
     //       排5=5(≡5)  排6=1(≡1)  排7=6(≡6)  排8=2(≡2)
-    static const int rankOfResidue[8] = {0, 5, 7, 3, 1, 4, 6, 2}; // 余数→排号(0基)
+    static const int rankOfResidue[8] = {0, 5, 7, 3, 1, 4, 6, 2}; // 余数→排号(0基) 喷孔号余数对应数组中第几排
     // 行号与喷孔号的对应：喷孔号是1基(1..1024)。若 .bin 第0行 = 喷孔1 → residueShift=1；
     // 若第0行 = 喷孔0 → residueShift=0。默认按"第0行=喷孔1"。跑图后若第一排对不上，改这个值。
     const int residueShift = 1;
