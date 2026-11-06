@@ -385,57 +385,58 @@ static int cli_parse(const char *path, CLI_Doc *doc)
     doc->units = 1.0;
 
     char line[65536];				/* 行缓冲区，足够容纳超长的 POLYLINE 行 */
-    int in_header = 0, in_geometry = 0;
-    Layer *cur_layer = NULL;
-    long geom_offset = 0;   /* 二进制几何部分的文件偏移 */
-    long pos_before;
+    int in_header = 0;              // 当前是否位于 `$$HEADERSTART ... $$HEADEREND` 之间
+    int in_geometry = 0;            // 当前是否位于 `$$GEOMETRYSTART ... $$GEOMETRYEND` 之间
+    Layer *cur_layer = NULL;        // 当前正在往哪一层里加多边形（`$$LAYER` 命令切层）
+    long geom_offset = 0;           /* 二进制几何部分的文件偏移 */
+    long pos_before;                // 当前行的文件起始偏移（下面要用）
 
     /* ---- 第一阶段：解析 ASCII 头部 （以及 ASCII 格式的几何部分）---- */
     while (1) {
-        pos_before = ftell(f);					 /* 记录当前行起始偏移，用于计算 geom_offset */
-        if (!fgets(line, sizeof(line), f)) break;
-        strip_comments(line);
-        char *p = trim(line);
-        if (!*p) continue;
-		/* 头部开始标记 */
+        pos_before = ftell(f);					 /* 记录当前行起始偏移，用于计算 geom_offset */ // 表示当前位置相对于文件开头的偏移量（字节数）
+        if (!fgets(line, sizeof(line), f)) break;       // `fgets` 会一直读到 `\n` 或 EOF，读完后文件指针已经跳到行尾了
+        strip_comments(line);                           // 删掉 `// ... //` 成对注释（CLI 规范注释语法），单行尾注释也删
+        char *p = trim(line);                           // 去首尾空白，拿到 "干净行" 指针 `p`
+        if (!*p) continue;                              // 空行直接跳过
+        /* 头部开始标记 */                                // 见到 `$$HEADERSTART`（13 个字符）→ 进入头部。`continue` 是因为这一行本身不含数据，处理完就下一行。
         if (strncmp(p, "$$HEADERSTART", 13) == 0) { in_header = 1; continue; }
 		/* 头部结束标记：记录二进制数据的起始偏移 */
         if (strncmp(p, "$$HEADEREND", 11) == 0) {
-            in_header = 0;
+            in_header = 0;          // 见到 `$$HEADEREND`（11 个字符）→ 退出头部段
             /* 精确计算 $$HEADEREND 之后的文件偏移（二进制数据可能直接紧跟，含 0x00/0x0A） */
-            char *he = strstr(line, "$$HEADEREND");
+            char *he = strstr(line, "$$HEADEREND");         // 在一个字符串中查找另一个子串第一次出现的位置   返回 第一次出现位置的指针
             geom_offset = pos_before + (long)(he - line) + 11;
             continue;
         }
 		/* 几何部分开始标记（仅 ASCII 格式有这个标记；二进制格式几何数据直接跟在 HEADEREND 后） */
         if (strncmp(p, "$$GEOMETRYSTART", 15) == 0) { in_geometry = 1; continue; }
 		/* 几何部分结束标记 */
-        if (strncmp(p, "$$GEOMETRYEND", 13) == 0) { in_geometry = 0; break; }
+        if (strncmp(p, "$$GEOMETRYEND", 13) == 0) { in_geometry = 0; break; }       // 见到 `$$GEOMETRYEND` → 退出几何段，**直接 break 整个 while 循环**，第一阶段结束
 
-        if (!in_header && !in_geometry) continue;
+        if (!in_header && !in_geometry) continue;       // **两个段都不在**（既不在 HEADER 里，也不在 GEOMETRY 里）的行 比如头部结束后、几何段开始前的空行 / 杂行，一律忽略
 
         /* ---- 头部命令解析 ---- */
         if (in_header) {
-            if (strncmp(p, "$$BINARY", 8) == 0) { doc->is_binary = 1; continue; }
+            if (strncmp(p, "$$BINARY", 8) == 0) { doc->is_binary = 1; continue; }       // 这个文件是二进制格式
             if (strncmp(p, "$$ASCII", 7) == 0)  { doc->is_binary = 0; continue; }
-			/* $$UNITS/0.001 — 坐标单位换算系数，例如 0.001 表示坐标值单位是 μm */
+            /* $$UNITS/0.001 — 坐标单位换算系数，例如 0.001 表示坐标值单位是 μm */  // 后边所以的多边形顶点，都要乘以这个系数
             if (strncmp(p, "$$UNITS/", 8) == 0) {
                 char *q = p + 8;
-                doc->units = next_num(&q);
-                continue;
+                doc->units = next_num(&q);                                  // 先跳过逗号和空白，再用 `strtod` 读出一个 double，同时把 `q` 指针往前推到这个数字之后
+                continue;                                                   // 头部剩下的东西一律跳过
             }
             /* VERSION / DATE / DIMENSION / LAYERS / LABEL 等暂不解析，跳过 */
             continue;
         }
 
-        /* ---- ASCII 几何部分解析 ---- */
+        /* ---- ASCII 几何部分解析 ---- */        //  这个 CLI 是 ASCII 文本格式 && 这个 CLI 是 ASCII 文本格式
         if (!doc->is_binary && in_geometry) {
-			/* $$LAYER/z — 开始新的一层，z 为高度（乘以 units 换算为 mm） */
+            /* $$LAYER/z — 开始新的一层，z 为高度（乘以 units 换算为 mm） */ //
             if (strncmp(p, "$$LAYER/", 8) == 0) {
                 char *q = p + 8;
                 double z = next_num(&q) * doc->units;
-                cur_layer = doc_add_layer(doc, z);
-                if (!cur_layer) {
+                cur_layer = doc_add_layer(doc, z);      // 内部 `realloc` 把层数组扩一层，返回新层指针 把这个新层指针赋给 `cur_layer`—— 后面读到的所有 `$$POLYLINE` 都挂在 `cur_layer` 上
+                if (!cur_layer) {                       // 如果 `doc_add_layer` 返回 NULL（内存不够），走统一的失败三件套
                     fclose(f);
                     cli_free(doc);
                     return -1;
@@ -453,7 +454,7 @@ static int cli_parse(const char *path, CLI_Doc *doc)
                 int dir = (int)next_num(&q);	/* 方向：0=顺时针, 1=逆时针, 2=开放线 */
                 int n   = (int)next_num(&q);	/* 顶点数 */
                 if (n < 2) continue;			/* 至少 2 个点才有意义 */
-                Polygon *P = layer_add_poly(cur_layer, dir, n);
+                Polygon *P = layer_add_poly(cur_layer, dir, n);     // 在当前层里 `realloc` 一个多边形出来，再 `malloc` 一个 `n` 个点的 `PointD` 数组
                 if (!P) {
                     fclose(f);
                     cli_free(doc);
@@ -479,7 +480,7 @@ static int cli_parse(const char *path, CLI_Doc *doc)
         int c;
         while ((c = fgetc(f)) != EOF) {
             if (c >= 127) { ungetc(c, f); break; }	/* 遇到合法 CI，回退并开始解析 */
-            if (!isspace(c)) { ungetc(c, f); break; }	/* 遇到非空白非 CI，回退（可能是数据） */
+            if (!isspace(c)) { ungetc(c, f); break; }	/* 遇到非空白非 CI，回退（可能是数据） */   // `ungetc(c, f)`：把刚读的这个字节**塞回文件缓冲区**
         }
 
         /* 自动检测字节序：CLI 规范是大端，但部分软件(如x86工具)输出小端 
@@ -757,12 +758,13 @@ int cli_fill2_convert(const char *input_path, const char *outdir, double dpi,
     CLI_Doc doc;
     int i;
 
-    if (!input_path || !outdir || dpi <= 0.0) return -1;
-    G_dpi = dpi;
-    G_units = 1.0;
-    G_xmin = 1e30; G_xmax = -1e30;
+    if (!input_path || !outdir || dpi <= 0.0) return -1;    // 空指针或 DPI 非正，直接 -1
+
+    G_dpi = dpi;                        // 把所有文件级全局变量重置一遍
+    G_units = 1.0;                      // 单位换算系数（`cli_parse` 里会被 `$$UNITS/` 覆盖）
+    G_xmin = 1e30; G_xmax = -1e30;      // 包围盒；初始化成 "极端值"（min=+∞、max=-∞），`compute_bbox` 才能第一个顶点就把它们刷新
     G_ymin = 1e30; G_ymax = -1e30;
-    g_bin_little_endian = 0;
+    g_bin_little_endian = 0;            // 二进制大小端检测结果，默认按规范大端
 
     /* status,含义（对应 cli_fill2.c 里的 return）
      * 0,成功，result 已填好
@@ -773,21 +775,21 @@ int cli_fill2_convert(const char *input_path, const char *outdir, double dpi,
      * -5,位图太大（>2 亿像素）
      * -6,所有层都是空的，没产出任何 .bin
      */
-    if (cli_parse(input_path, &doc) != 0) return -1;
+    if (cli_parse(input_path, &doc) != 0) return -1;        // 解析整个 CLI 文件：ASCII 头部 + ASCII / 二进制几何段
     if (doc.n_layers == 0) {
         cli_free(&doc);
         return -2;
     }
 
-    compute_bbox(&doc);
+    compute_bbox(&doc);                 // 遍历所有层所有闭合多边形的顶点，刷新 `G_xmin/G_xmax/G_ymin/G_ymax`，最后四周加 1 像素余量
     if (!isfinite(G_xmin) || !isfinite(G_xmax) || G_xmin >= G_xmax ||
         !isfinite(G_ymin) || !isfinite(G_ymax) || G_ymin >= G_ymax) {
-        cli_free(&doc);
+        cli_free(&doc);                 // `!isfinite`：浮点异常（NaN/Inf）兜底
         return -3;
     }
 
     if (G_WIDTH <= 0 || G_HEIGHT <= 0 ||
-        (long long)G_WIDTH * (long long)G_HEIGHT > MAX_IMAGE_PIXELS) {
+        (long long)G_WIDTH * (long long)G_HEIGHT > MAX_IMAGE_PIXELS) {          // 防止一个超大模型直接把内存吃爆
         cli_free(&doc);
         return -5;
     }
@@ -795,20 +797,20 @@ int cli_fill2_convert(const char *input_path, const char *outdir, double dpi,
     int output_layer = 0;
     mkdir(outdir, 0755);
     for (i = 0; i < doc.n_layers; ++i) {
-        int layer_status = process_layer(&doc.layers[i], output_layer + 1, outdir);
+        int layer_status = process_layer(&doc.layers[i], output_layer + 1, outdir);     // **产出编号是压缩的**：第 1、2 层都为空，第 3 层成功，它会写成 `layer_001.bin`
         if (layer_status < 0) {
             cli_free(&doc);
             return -4;
         }
-        if (layer_status > 0) ++output_layer;
+        if (layer_status > 0) ++output_layer;   // `1` 才 `output_layer++`
     }
 
-    if (output_layer == 0) {
+    if (output_layer == 0) {                    // 所有层都处理完了但一层都没产出（全是空的），返回 -6
         cli_free(&doc);
         return -6;
     }
 
-    if (result) {
+    if (result) {                               // 把产出层数、画布宽高、行字节数、包围盒 mm 值全部塞进 `CliFillResult`
         result->layer_count = output_layer;
         result->width = G_WIDTH;
         result->height = G_HEIGHT;
