@@ -55,6 +55,7 @@ struct PrintParams {
     int headCount;              // 喷头个数 (1~8)
     int dpi;                    // DPI (200~1600)
     int passCount;              // pass 数 (1~16)
+    int bitsPerPixel;           // 生成 .bin / tem.bin 的每像素位数：1 或 2（默认 2）
     QList<int> leftRight;       // 左右值（像素，X 方向偏差矫正），N-1 个
     QList<int> overlapNozzle;   // 重叠孔（孔数，Y 方向），N-1 个
     QList<int> bidirectional;   // 双向值（像素，往返 pass 起点对齐），passCount-1 个

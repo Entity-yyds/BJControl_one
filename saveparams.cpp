@@ -233,6 +233,7 @@ void SaveParams::savePrintParams(const PrintParams &params)
     settings->setValue("headCount", params.headCount);
     settings->setValue("dpi", params.dpi);
     settings->setValue("passCount", params.passCount);
+    settings->setValue("bitsPerPixel", params.bitsPerPixel);   // 1=单色 2bit=灰度
     // 转 QStringList 存（避免 QVariant 对 QList<int> 的兼容问题）
     QStringList lr, ov, bi;
     for (int v : params.leftRight)      lr << QString::number(v);
@@ -254,6 +255,9 @@ PrintParams SaveParams::loadPrintParams()
     params.headCount = settings->value("headCount", params.headCount).toInt();
     params.dpi       = settings->value("dpi", params.dpi).toInt();
     params.passCount = settings->value("passCount", params.passCount).toInt();
+    // 只接受 1/2，旧配置里没有这个键时回落到默认 2
+    params.bitsPerPixel = settings->value("bitsPerPixel", params.bitsPerPixel).toInt();
+    if (params.bitsPerPixel != 1) params.bitsPerPixel = 2;
 
     params.leftRight.clear();
     const QStringList lr = settings->value("leftRight").toStringList();
@@ -277,6 +281,7 @@ PrintParams SaveParams::getDefaultPrintParams()
     p.headCount = 1;        // 单喷头
     p.dpi       = 600;
     p.passCount = 1;        // 单 pass，默认无双向值
+    p.bitsPerPixel = 2;     // 默认 2bit/pixel，与原工程行为一致
     p.leftRight.clear();
     p.overlapNozzle.clear();
     p.bidirectional.clear();

@@ -7,21 +7,26 @@ const QVector<int>& xingguangRankOffsets()
     return offs;
 }
 /*
- * `src`：原始 2bpp 数据（来自 `layer_001.bin`）
- * `width/height/srcRowBytes`：原始画布尺寸
+ * `src`：原始打包数据（来自 `layer_001.bin`，1bit 或 2bit 每像素）
+ * `width/height/srcRowBytes`：原始画布尺寸（srcRowBytes 由生成端给出，别自己推）
  * `rankOffsets`：8 个排的横向偏移像素数 `{0,24,88,112,306,328,392,416}`
  * `out/outRowBytes`：输出参数（引用带回）
  * `swathRows = 1024`：一节多少行，默认 1024
+ * `bitsPerPixel = 2`：源数据每像素位数，1 或 2
 */
 
-bool applyRowOffset2bpp(const QByteArray &src, int width, int height, int srcRowBytes,
-                        const QVector<int> &rankOffsets,
-                        QByteArray &out, int &outRowBytes, int swathRows)
+bool applyRowOffsetBin(const QByteArray &src, int width, int height, int srcRowBytes,
+                       const QVector<int> &rankOffsets,
+                       QByteArray &out, int &outRowBytes, int swathRows, int bitsPerPixel)
 {
+    const int bpp = bin_bpp_norm(bitsPerPixel);
     // 入参校验 偏移表不能为空 偏移表不能为空
     if (rankOffsets.isEmpty() || width <= 0 || height <= 0 || srcRowBytes <= 0)
         return false;
     if (swathRows <= 0) swathRows = 1024;
+    // 行字节数必须与位深匹配，否则下面的取像素会整体错位，宁可直接失败
+    if (srcRowBytes < bin_row_bytes(width, bpp))
+        return false;
     if (src.size() < srcRowBytes * height)
         return false;
     // 扫一遍偏移表取最大值 = 416。后面输出画布宽要按这个最大值扩
@@ -30,7 +35,7 @@ bool applyRowOffset2bpp(const QByteArray &src, int width, int height, int srcRow
         maxOffset = qMax(maxOffset, o);
 
     const int outWidth  = maxOffset + width;    // 统一画布宽
-    outRowBytes = (outWidth + 3) / 4;           // 输出每行字节数 = 4 像素一字节，向上取整
+    outRowBytes = bin_row_bytes(outWidth, bpp); // 2bpp=ceil/(4)，1bpp=ceil/(8)
 
     const int rankCount = rankOffsets.size();   // = 8
     // ===== 真实喷孔→排映射（替代原来的 row%8 占位）=====
@@ -81,52 +86,55 @@ bool applyRowOffset2bpp(const QByteArray &src, int width, int height, int srcRow
             const int srcRow  = gRow * srcRowBytes;   // 源行在src里的字节起点
             const int dstRow  = cursor[rank]++;       // 目标行 = 该排连续块下一个空位
 
+            // 直接拿指针做整行搬运：省掉 QByteArray::at() 的每次边界检查
+            const uchar *srcRowPtr = reinterpret_cast<const uchar *>(src.constData()) + srcRow;
+            uchar *dstRowPtr = reinterpret_cast<uchar *>(raw) + dstRow * outRowBytes;
+
             for (int x = 0; x < outWidth; ++x) {
                 if (x < off)      continue;         // 行首补的偏移区 = 背景(0)
                 const int sx = x - off;
                 if (sx >= width)  continue;         // 行尾补足区 = 背景(0)
 
-                const uchar v = (static_cast<uchar>(src.at(srcRow + sx / 4))
-                                 >> (6 - (sx % 4) * 2)) & 0x03;
-                if (v == 0) continue;
+                const uchar v = bin_pixel_get(srcRowPtr, sx, bpp);
+                if (v == 0) continue;               // 背景不落笔（输出已清零）
 
-                const int shift = 6 - (x % 4) * 2;
-                raw[dstRow * outRowBytes + x / 4] = static_cast<char>(
-                    raw[dstRow * outRowBytes + x / 4] | ((v & 0x03) << shift));
+                bin_pixel_or(dstRowPtr, x, v, bpp); // 1bpp 下非 0 即置 1，2bpp 保留 1/2/3
             }
         }
     }
     return true;
 }
 
-bool rotate90ccw2bpp(const QByteArray &src, int width, int height, int srcRowBytes,
-                     QByteArray &out, int &outRowBytes)
+bool rotate90ccwBin(const QByteArray &src, int width, int height, int srcRowBytes,
+                    QByteArray &out, int &outRowBytes, int bitsPerPixel)
 {
+    const int bpp = bin_bpp_norm(bitsPerPixel);
     if (width <= 0 || height <= 0 || srcRowBytes <= 0)
+        return false;
+    if (srcRowBytes < bin_row_bytes(width, bpp))
         return false;
     if (src.size() < srcRowBytes * height)
         return false;
 
     const int outWidth  = height;   // 旋转后宽 = 原高
     const int outHeight = width;    // 旋转后高 = 原宽
-    outRowBytes = (outWidth + 3) / 4;
+    outRowBytes = bin_row_bytes(outWidth, bpp);
     out.resize(outRowBytes * outHeight);
     out.fill(0);
-    char *dst = out.data();
+    uchar *dst = reinterpret_cast<uchar *>(out.data());
+    const uchar *srcBase = reinterpret_cast<const uchar *>(src.constData());
 
     for (int y = 0; y < height; ++y) {          // 原行 → 新列
+        const uchar *srcRowPtr = srcBase + (size_t)y * srcRowBytes;
         for (int x = 0; x < width; ++x) {       // 原列 → 新行(翻转)
-            const uchar v = (static_cast<uchar>(src.at(y * srcRowBytes + x / 4))
-                             >> (6 - (x % 4) * 2)) & 0x03;
+            const uchar v = bin_pixel_get(srcRowPtr, x, bpp);
             if (v == 0) continue;
             //const int dx = y;                   // 新列 = 原行
             const int dy = width - 1 - x;       // 新行 = 原宽翻转
 	    const int dx = height - 1 - y;   // 新列 = 原高翻转：底行(y=0)→最右列
 	    //const int dy = x;                // 新行 = 原列：左列(x=0)→底部
 
-            const int shift = 6 - (dx % 4) * 2;
-            dst[dy * outRowBytes + dx / 4] = static_cast<char>(
-                dst[dy * outRowBytes + dx / 4] | ((v & 0x03) << shift));
+            bin_pixel_or(dst + (size_t)dy * outRowBytes, dx, v, bpp);
         }
     }
     return true;
@@ -135,17 +143,19 @@ bool rotate90ccw2bpp(const QByteArray &src, int width, int height, int srcRowByt
 #ifdef BINROWOFFSET_STANDALONE
 // 独立自测：读入 .bin → 排偏移 → 90°逆时针旋转
 // 输出: 前缀_off.bin/_off.png（偏移后）、前缀_rot.bin/_rot.png（旋转后）
-// 用法: binrowoffset <输入.bin> <宽度> <高度> [输出前缀]
+// 用法: binrowoffset <输入.bin> <宽度> <高度> [输出前缀] [--bpp 1|2]
+//   输入位深默认 2，与生成端保持同一位深才能对上像素；
 //   输出前缀缺省 = 去掉输入文件扩展名，例如 layer_001.bin -> layer_001_off/rot.bin/_off/rot.png
 #include <QFile>
 #include <QTextStream>
 #include <QGuiApplication>
 #include <QImage>
 
-static int read2bit(const QByteArray &src, int rowBytes, int x, int y)
+static int read_bin_pixel(const QByteArray &src, int rowBytes, int x, int y, int bpp)
 {
-    return (static_cast<uchar>(src.at(y * rowBytes + x / 4))
-            >> (6 - (x % 4) * 2)) & 0x03;
+    const unsigned char *row = reinterpret_cast<const unsigned char *>(src.constData())
+                               + (size_t)y * rowBytes;
+    return bin_pixel_get(row, x, bpp);
 }
 
 int main(int argc, char *argv[])
@@ -153,14 +163,25 @@ int main(int argc, char *argv[])
     QGuiApplication app(argc, argv);   // 需要应用实例才能加载 PNG 图像插件
 
     if (argc < 4) {
-        QTextStream(stderr) << "用法: binrowoffset <输入.bin> <宽度> <高度> [输出前缀]\n";
+        QTextStream(stderr) << "用法: binrowoffset <输入.bin> <宽度> <高度> [输出前缀] [--bpp 1|2]\n";
         return 1;
     }
     const QString inPath  = QString::fromLocal8Bit(argv[1]);
     const int     width   = QString::fromLocal8Bit(argv[2]).toInt();
     const int     height  = QString::fromLocal8Bit(argv[3]).toInt();
-    const QString outBase = argc >= 5 ? QString::fromLocal8Bit(argv[4])
-                                      : inPath.left(inPath.lastIndexOf(QLatin1Char('.')));
+
+    int bpp = BIN_BPP_2;
+    QString outBaseArg;
+    for (int i = 4; i < argc; ++i) {
+        if (strcmp(argv[i], "--bpp") == 0 && i + 1 < argc) {
+            bpp = bin_bpp_norm(atoi(argv[++i]));
+        } else if (outBaseArg.isEmpty()) {
+            outBaseArg = QString::fromLocal8Bit(argv[i]);
+        }
+    }
+    const QString outBase = outBaseArg.isEmpty()
+                            ? inPath.left(inPath.lastIndexOf(QLatin1Char('.')))
+                            : outBaseArg;
 
     QFile f(inPath);
     if (!f.open(QIODevice::ReadOnly)) {
@@ -170,12 +191,12 @@ int main(int argc, char *argv[])
     const QByteArray src = f.readAll();
     f.close();
 
-    const int srcRowBytes = (width + 3) / 4;
+    const int srcRowBytes = bin_row_bytes(width, bpp);
     QByteArray out;
     int outRowBytes = 0;
-    if (!applyRowOffset2bpp(src, width, height, srcRowBytes,
-                            xingguangRankOffsets(), out, outRowBytes)) {
-        QTextStream(stderr) << "变换失败（检查数据尺寸）\n";
+    if (!applyRowOffsetBin(src, width, height, srcRowBytes,
+                           xingguangRankOffsets(), out, outRowBytes, 1024, bpp)) {
+        QTextStream(stderr) << "变换失败（检查数据尺寸/位深）\n";
         return 1;
     }
 
@@ -198,7 +219,7 @@ int main(int argc, char *argv[])
     for (int y = 0; y < outHeight; ++y) {
         uchar *line = img.scanLine(outHeight - 1 - y);   // 底部 = .bin 第0行
         for (int x = 0; x < outWidth; ++x) {
-            const int v = read2bit(out, outRowBytes, x, y);
+            const int v = read_bin_pixel(out, outRowBytes, x, y, bpp);
             // 映射：0→255(白), 1→0(黑), 2→85, 3→170
             line[x] = v == 0 ? 255
                     : v == 1 ? 0
@@ -215,7 +236,7 @@ int main(int argc, char *argv[])
     // 旋转后：宽 = 补0后的行数(outHeight)，高 = 原宽+416。
     QByteArray rot;
     int rotRowBytes = 0;
-    if (!rotate90ccw2bpp(out, outWidth, outHeight, outRowBytes, rot, rotRowBytes)) {
+    if (!rotate90ccwBin(out, outWidth, outHeight, outRowBytes, rot, rotRowBytes, bpp)) {
         QTextStream(stderr) << "旋转失败\n";
         return 1;
     }
@@ -237,7 +258,7 @@ int main(int argc, char *argv[])
     for (int y = 0; y < rotHeight; ++y) {
         uchar *line = rimg.scanLine(y);
         for (int x = 0; x < rotWidth; ++x) {
-            const int v = read2bit(rot, rotRowBytes, x, y);
+            const int v = read_bin_pixel(rot, rotRowBytes, x, y, bpp);
             line[x] = v == 0 ? 255
                     : v == 1 ? 0
                     : static_cast<uchar>(255 - v * 85);
@@ -250,10 +271,10 @@ int main(int argc, char *argv[])
     }
 
     QTextStream(stdout) << "完成:\n"
-                        << "  " << binPath << " (偏移后 2bpp, " << outWidth << "x" << outHeight
+                        << "  " << binPath << " (偏移后 " << bpp << "bpp, " << outWidth << "x" << outHeight
                         << ", 每行" << outRowBytes << "字节)\n"
                         << "  " << pngPath << " (偏移后预览)\n"
-                        << "  " << rotBinPath << " (旋转后 2bpp, " << rotWidth << "x" << rotHeight
+                        << "  " << rotBinPath << " (旋转后 " << bpp << "bpp, " << rotWidth << "x" << rotHeight
                         << ", 每行" << rotRowBytes << "字节)\n"
                         << "  " << rotPngPath << " (旋转后预览)\n";
     return 0;

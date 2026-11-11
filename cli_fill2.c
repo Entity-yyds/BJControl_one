@@ -1,14 +1,14 @@
 /*
- * cli_fill.c — 读取 CLI 切片文件，将每一层轮廓扫描线填充为 2bit 位图
+ * cli_fill.c — 读取 CLI 切片文件，将每一层轮廓扫描线填充为 1bit / 2bit 位图
  *
  * 功能：
  *   - 自动检测 ASCII / 二进制 CLI 格式
  *   - 解析所有层 (LAYER) 和多边形 (POLYLINE)
  *   - 内外轮廓统一用奇偶规则填充（自动挖洞）
- *   - 每层输出原始 2bit 数据 (.bin) 和 BMP 预览 (.bmp)
+ *   - 每层输出打包数据 (.bin)：位深由 G_bpp 决定（1bit 或 2bit 每像素）
  *
  * 编译：gcc -O2 -o cli_fill cli_fill.c -lm
- * 用法：./cli_fill input.cli [--dpi 400] [--outdir layers]
+ * 用法：./cli_fill input.cli [--dpi 400] [--outdir layers] [--bpp 1|2]
  */
 
 #include <stdio.h>
@@ -18,6 +18,7 @@
 #include <ctype.h>
 #include <sys/stat.h>
 #include "cli_fill2.h"
+#include "binformat.h"      /* 1bit/2bit 打包公式的唯一来源，见 binformat.h */
 
 /* ===================================================================
  *  全局配置
@@ -26,6 +27,8 @@
 static double G_dpi   = 400.0;
 /* CLI 文件中的坐标单位 → mm 的换算系数。例如 $$UNITS/0.001 表示坐标单位是 μm */
 static double G_units = 1.0;   /* CLI 坐标单位 → mm */
+/* 输出 .bin 的每像素位数：1 或 2。由 cli_fill2_convert 的入参 / main 的 --bpp 决定 */
+static int    G_bpp   = 2;
 
 /* 全局包围盒（运行时从所有层扫描得到） */
 /* 全局包围盒：运行时从所有层的所有顶点扫描得到，初始化为极端值 */
@@ -36,18 +39,19 @@ static double G_ymin =  1e30, G_ymax = -1e30;
 /* 画布宽高（像素）：物理尺寸 × 像素密度，+1 保证边界像素不被裁掉 */
 #define G_WIDTH    ((int)ceil((G_xmax - G_xmin) * PX_PER_MM) + 1)
 #define G_HEIGHT   ((int)ceil((G_ymax - G_ymin) * PX_PER_MM) + 1)
-/* 每行字节数：2bit/pixel，4 像素=1 字节，向上取整 */
-#define ROW_BYTES  ((G_WIDTH + 3) / 4)
+/* 每行字节数：位深相关，1bpp=(w+7)/8，2bpp=(w+3)/4（公式统一取自 binformat.h） */
+#define ROW_BYTES  (bin_row_bytes(G_WIDTH, G_bpp))
 #define MAX_POLYGON_POINTS 1000000U
 #define MAX_IMAGE_PIXELS 200000000LL
 
 /* ===================================================================
- *  2bit 图像
+ *  打包位图（1bit 或 2bit 每像素）
  * =================================================================== */
 typedef struct {
     int width, height;
     int row_bytes;
-    unsigned char *data;   /* 2bit/pixel, MSB 优先, row0=y_min(底部) */
+    int bpp;               /* 1 或 2：每像素位数 */
+    unsigned char *data;   /* 打包像素, MSB 优先, row0=y_min(底部) */
 } BitImage;
 
 /* 创建位图：按全局画布尺寸分配并清零（calloc 保证初始全 0 = 全背景） */
@@ -55,6 +59,7 @@ static int img_create(BitImage *img)
 {
     img->width     = G_WIDTH;
     img->height    = G_HEIGHT;
+    img->bpp       = G_bpp;
     img->row_bytes = ROW_BYTES;
     img->data      = calloc((size_t)ROW_BYTES * G_HEIGHT, 1);
     return img->data ? 0 : -1;
@@ -68,35 +73,39 @@ static void img_clear(BitImage *img)
  * 设置单个像素的值（带边界保护）
  *
  * @param x,y  像素坐标（x 从左到右，y 从下到上）
- * @param val  2bit 像素值（0~3），超出会被 &0x03 截断
+ * @param val  像素值：2bpp 下 0~3（超出被 &0x03 截断）；1bpp 下非 0 即视为 1
  *
- * 位操作原理：
- *   像素在字节内的位置 shift = 6 - (x%4)*2
- *     x%4=0 → shift=6（最高两位）
- *     x%4=1 → shift=4
- *     x%4=2 → shift=2
- *     x%4=3 → shift=0（最低两位）
- *   先把目标两位清零（mask = ~(0x03<<shift)），再写入新值
+ * 位操作公式统一在 binformat.h 里（bin_pixel_set），这里只做寻行和边界检查。
  */
 
 static inline void img_setpixel(BitImage *img, int x, int y, unsigned char val)
 {
     if (x < 0 || x >= img->width || y < 0 || y >= img->height) return;
-    int byte_idx = y * img->row_bytes + x / 4;
-    int shift    = 6 - (x % 4) * 2;          /* p0→6, p1→4, p2→2, p3→0 */
-    unsigned char mask = ~(0x03 << shift);
-    img->data[byte_idx] = (img->data[byte_idx] & mask) | ((val & 0x03) << shift);
+    bin_pixel_set(img->data + (size_t)y * img->row_bytes, x, val, img->bpp);
 }
 
+/*
+ * 填充一段连续像素 [x0, x1]（同一行）。
+ * 为了不每像素都算一次位偏移，把首尾不足"整字节"的部分逐点写，中间整字节直接 memset：
+ *   1bpp：8 像素 = 1 字节，整字节填充值 = 全 1(0xFF) 或全 0(0x00)
+ *   2bpp：4 像素 = 1 字节，整字节填充值 = val * 0x55（每 2bit 复制一遍）
+ */
 static void img_fill_span(BitImage *img, int x0, int x1, int y, unsigned char val)
 {
-    unsigned char packed = (unsigned char)((val & 0x03) * 0x55);
-    while (x0 <= x1 && (x0 & 3)) img_setpixel(img, x0++, y, val);
+    const int bpp     = img->bpp;
+    const int px_per  = (bpp == BIN_BPP_1) ? 8 : 4;
+    const int px_mask = px_per - 1;
+    const unsigned char packed = (bpp == BIN_BPP_1)
+        ? (unsigned char)(val ? 0xFF : 0x00)
+        : (unsigned char)((val & 0x03) * 0x55);
+    unsigned char *row = img->data + (size_t)y * img->row_bytes;
+
+    while (x0 <= x1 && (x0 & px_mask)) img_setpixel(img, x0++, y, val);
     if (x0 <= x1) {
-        int full_bytes = (x1 - x0 + 1) / 4;
+        int full_bytes = (x1 - x0 + 1) / px_per;
         if (full_bytes > 0) {
-            memset(img->data + y * img->row_bytes + x0 / 4, packed, (size_t)full_bytes);
-            x0 += full_bytes * 4;
+            memset(row + x0 / px_per, packed, (size_t)full_bytes);
+            x0 += full_bytes * px_per;
         }
     }
     while (x0 <= x1) img_setpixel(img, x0++, y, val);
@@ -596,10 +605,10 @@ static void compute_bbox(const CLI_Doc *doc)
 }
 
 /* ===================================================================
- *  导出原始 2bit 数据
+ *  导出原始打包数据（1bit 或 2bit 每像素，无文件头）
  * =================================================================== */
- /* 直接把位图的原始数据写入文件（无任何头信息），格式就是 2bit/pixel 打包 */
-static int save_raw_2bit(const char *path, const BitImage *img)
+ /* 直接把位图的原始数据写入文件，格式由 img->bpp 决定（见 binformat.h） */
+static int save_raw_bin(const char *path, const BitImage *img)
 {
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
@@ -626,7 +635,7 @@ static void wr_le32(FILE *f, unsigned int v)
     fputc((v>>16)&0xff,f); fputc((v>>24)&0xff,f);
 }
 /**
- * save_bmp_preview — 把 2bit 位图导出为 8 位灰度 BMP 预览图
+ * save_bmp_preview — 把打包位图（1bit/2bit）导出为 8 位灰度 BMP 预览图
  *
  * BMP 结构：
  *   - 文件头（14 字节）：BM 标识、文件大小、数据偏移
@@ -638,8 +647,8 @@ static void wr_le32(FILE *f, unsigned int v)
  * 调色板映射：
  *   索引 0 = 白色（255,255,255）→ 背景/不喷
  *   索引 1 = 黑色（0,0,0）      → 喷印
- *   索引 2 = 深灰（64,64,64）   → 预留
- *   索引 3 = 浅灰（128,128,128）→ 预留
+ *   索引 2 = 深灰（64,64,64）   → 预留（仅 2bpp 会出现）
+ *   索引 3 = 浅灰（128,128,128）→ 预留（仅 2bpp 会出现）
  */
 
 static int save_bmp_preview(const char *path, const BitImage *img)
@@ -670,14 +679,12 @@ static int save_bmp_preview(const char *path, const BitImage *img)
     unsigned char zero[4] = {0};
     for (int i = 4; i < 256; i++) fwrite(zero, 1, 4, f);
 
-    /* 像素数据：BMP 自底向上，2bit → 调色板索引 */
+    /* 像素数据：BMP 自底向上，打包像素 → 调色板索引（0/1 或 0~3） */
     unsigned char *line = calloc((size_t)row_size, 1);
     for (int row = 0; row < h; row++) {
+        const unsigned char *src = img->data + (size_t)row * img->row_bytes;
         for (int x = 0; x < w; x++) {
-            int byte_idx = row * img->row_bytes + x / 4;
-            int shift    = 6 - (x % 4) * 2;
-            unsigned char val = (img->data[byte_idx] >> shift) & 0x03;
-            line[x] = val;   /* 直接作为调色板索引 */
+            line[x] = bin_pixel_get(src, x, img->bpp);   /* 直接作为调色板索引 */
         }
         fwrite(line, 1, (size_t)row_size, f);
     }
@@ -687,7 +694,7 @@ static int save_bmp_preview(const char *path, const BitImage *img)
 }
 
 /* ===================================================================
- *  统计喷印像素（值非零即喷）
+ *  统计喷印像素（1bpp 看 bit，2bpp 看 v!=0）
  * =================================================================== */
 static int count_spray(const BitImage *img)
 {
@@ -695,8 +702,15 @@ static int count_spray(const BitImage *img)
     int total = img->row_bytes * img->height;
     for (int i = 0; i < total; i++) {
         unsigned char b = img->data[i];
-        unsigned char p0 = (b>>6)&3, p1=(b>>4)&3, p2=(b>>2)&3, p3=b&3;
-        spray += (p0!=0) + (p1!=0) + (p2!=0) + (p3!=0);
+        if (img->bpp == BIN_BPP_1) {
+            /* 1bpp：直接数 popcount */
+            b = (unsigned char)(b - ((b >> 1) & 0x55));
+            b = (unsigned char)((b & 0x33) + ((b >> 2) & 0x33));
+            spray += (b + (b >> 4)) & 0x0F;
+        } else {
+            unsigned char p0 = (b>>6)&3, p1=(b>>4)&3, p2=(b>>2)&3, p3=b&3;
+            spray += (p0!=0) + (p1!=0) + (p2!=0) + (p3!=0);
+        }
     }
     return spray;
 }
@@ -742,18 +756,18 @@ static int process_layer(const Layer *L, int layer_idx, const char *outdir)
         free(img.data);
         return 0;
     }
-    printf("  层 %03d (z=%8.3f mm): 喷印 %7d / %7d px (%.2f%%)\n",
-           layer_idx, L->z, spray, total, 100.0 * spray / total);
+    printf("  层 %03d (z=%8.3f mm): 喷印 %7d / %7d px (%.2f%%), %dbit/pixel\n",
+           layer_idx, L->z, spray, total, 100.0 * spray / total, img.bpp);
 
     char bin_path[512];
     snprintf(bin_path, sizeof(bin_path), "%s/layer_%03d.bin", outdir, layer_idx);
-    int result = save_raw_2bit(bin_path, &img);
+    int result = save_raw_bin(bin_path, &img);
     free(img.data);
     return result == 0 ? 1 : -1;
 }
 
 int cli_fill2_convert(const char *input_path, const char *outdir, double dpi,
-                      CliFillResult *result)
+                      int bits_per_pixel, CliFillResult *result)
 {
     CLI_Doc doc;
     int i;
@@ -761,6 +775,7 @@ int cli_fill2_convert(const char *input_path, const char *outdir, double dpi,
     if (!input_path || !outdir || dpi <= 0.0) return -1;    // 空指针或 DPI 非正，直接 -1
 
     G_dpi = dpi;                        // 把所有文件级全局变量重置一遍
+    G_bpp = bin_bpp_norm(bits_per_pixel);   // 1 或 2，其它值按 2 处理
     G_units = 1.0;                      // 单位换算系数（`cli_parse` 里会被 `$$UNITS/` 覆盖）
     G_xmin = 1e30; G_xmax = -1e30;      // 包围盒；初始化成 "极端值"（min=+∞、max=-∞），`compute_bbox` 才能第一个顶点就把它们刷新
     G_ymin = 1e30; G_ymax = -1e30;
@@ -810,11 +825,12 @@ int cli_fill2_convert(const char *input_path, const char *outdir, double dpi,
         return -6;
     }
 
-    if (result) {                               // 把产出层数、画布宽高、行字节数、包围盒 mm 值全部塞进 `CliFillResult`
+    if (result) {                               // 把产出层数、画布宽高、行字节数、位深、包围盒 mm 值全部塞进 `CliFillResult`
         result->layer_count = output_layer;
         result->width = G_WIDTH;
         result->height = G_HEIGHT;
         result->row_bytes = ROW_BYTES;
+        result->bits_per_pixel = G_bpp;
         result->x_min = G_xmin;
         result->x_max = G_xmax;
         result->y_min = G_ymin;
@@ -838,19 +854,22 @@ int main(int argc, char *argv[])
             G_dpi = atof(argv[++i]);
         } else if (strcmp(argv[i], "--outdir") == 0 && i + 1 < argc) {
             outdir = argv[++i];
+        } else if (strcmp(argv[i], "--bpp") == 0 && i + 1 < argc) {
+            G_bpp = bin_bpp_norm(atoi(argv[++i]));   // 只接受 1/2，其它按 2
         } else if (!infile) {
             infile = argv[i];
         }
     }
 
     if (!infile) {
-        fprintf(stderr, "用法: %s <input.cli> [--dpi 400] [--outdir layers]\n", argv[0]);
+        fprintf(stderr, "用法: %s <input.cli> [--dpi 400] [--outdir layers] [--bpp 1|2]\n", argv[0]);
         return 1;
     }
 
     printf("=== CLI 多层填充工具 ===\n");
     printf("输入文件: %s\n", infile);
     printf("分辨率:   %.0f DPI\n", G_dpi);
+    printf("位深:     %d bit/pixel\n", G_bpp);
 
     /* 解析 */
     CLI_Doc doc;

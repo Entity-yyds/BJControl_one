@@ -33,7 +33,9 @@ HEADERS += \
     vacuumcontroller.h \
     cli_fill2.h \
     clifillworker.h\
-    binrowoffset.h
+    binrowoffset.h \
+    binformat.h
+# binformat.h：1bit/2bit 打包格式（C 与 C++ 共用，cli_fill2.c 也包含它）
 
 FORMS += \
     mainwindow.ui

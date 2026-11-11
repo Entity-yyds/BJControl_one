@@ -80,6 +80,7 @@ MainWindow::MainWindow(QWidget *parent) // 初始化列表优点：在初始化�
     , previewLayerCount(0)          // 总层数：0=尚未加载任何CLI文件
     , previewWidth(0)               // 切片画布宽度（像素）：0=未加载 由 cli_fill2_convert() 通过 CliFillResult 返回
     , previewHeight(0)              // 切片画布高度（像素）：0=未加载
+    , previewBpp(2)                 // 当前切片缓存的每像素位数：默认 2，加载缓存时以 meta.txt 为准
     , cliThread(nullptr)            // CLI切片线程指针
     , cliWorker(nullptr)            // CLI切片工作对象
     , motorPowered(false)    // ← 新增
@@ -984,6 +985,26 @@ void MainWindow::createPrintParamsTab()
     biCountHint->setText(QString("双向值: %1 个")
                          .arg(spinPassCount->value() > 1 ? spinPassCount->value() - 1 : 0));
 
+    // ===== 位深开关：.bin / tem.bin 一个像素用 1bit 还是 2bit 表示 =====
+    paramLayout->addWidget(new QLabel("位深:", this), 3, 0);
+    comboPixelFormat = new QComboBox(this);
+    // itemData 存真实位深，界面文案以后随便改，取值逻辑不受影响
+    comboPixelFormat->addItem("2bit/像素（灰度，兼容原流程）", 2);
+    comboPixelFormat->addItem("1bit/像素（单色，数据量减半）", 1);
+    comboPixelFormat->setCurrentIndex(currentPrintParams.bitsPerPixel == 1 ? 1 : 0);
+    paramLayout->addWidget(comboPixelFormat, 3, 1, 1, 2);
+    connect(comboPixelFormat, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onPixelFormatChanged);
+
+    labelPixelFormatHint = new QLabel(this);
+    labelPixelFormatHint->setStyleSheet("color: #666; font-size: 12px;");
+    labelPixelFormatHint->setWordWrap(true);
+    paramLayout->addWidget(labelPixelFormatHint, 4, 0, 1, 3);
+    // 初始说明文案：按当前设置填一次（此时信号已连上，但 setCurrentIndex 在 connect 之前调用过，不会触发重切片）
+    labelPixelFormatHint->setText((currentPrintParams.bitsPerPixel == 1)
+        ? "1bit/像素：每行 ceil(宽/8) 字节，像素1=喷；发送端按位直接取 1024 像素，不再做 2bit→喷/不喷 转换。"
+        : "2bit/像素：每行 ceil(宽/4) 字节，像素0=背景、1/2/3=喷印；发送端把非 0 像素转成 1bit 再下发。");
+
     leftLayout->addWidget(paramGroup);
 
     // 应用按钮
@@ -1135,6 +1156,10 @@ void MainWindow::on_btnApplyPrintParams_clicked()
     currentPrintParams.headCount = spinHeadCount->value();
     currentPrintParams.dpi       = spinDpi->value();
     currentPrintParams.passCount = spinPassCount->value();
+    if (comboPixelFormat) {
+        const int bpp = comboPixelFormat->currentData().toInt();
+        currentPrintParams.bitsPerPixel = (bpp == 1) ? 1 : 2;
+    }
 
     currentPrintParams.leftRight.clear();
     currentPrintParams.overlapNozzle.clear();
@@ -1150,14 +1175,52 @@ void MainWindow::on_btnApplyPrintParams_clicked()
     for (int v : currentPrintParams.overlapNozzle)  ov << QString::number(v);
     for (int v : currentPrintParams.bidirectional)  bi << QString::number(v);
 
-    appendLog(QString("应用打印参数: 喷头=%1, DPI=%2, pass数=%3")
+    appendLog(QString("应用打印参数: 喷头=%1, DPI=%2, pass数=%3, 位深=%4bit/px")
               .arg(currentPrintParams.headCount).arg(currentPrintParams.dpi)
-              .arg(currentPrintParams.passCount), "blue");
+              .arg(currentPrintParams.passCount).arg(currentPrintParams.bitsPerPixel), "blue");
     appendLog(QString("左右值(px): %1").arg(lr.join(", ")), "darkCyan");
     appendLog(QString("重叠孔(个): %1").arg(ov.join(", ")), "darkCyan");
     appendLog(QString("双向值(px): %1").arg(bi.join(", ")), "darkCyan");
 
     // TODO: 下发到设备的命令字待固件协议确认后补充（不编造）
+}
+
+/*
+ * 位深开关：切换 .bin / tem.bin 的每像素位数（1bit 或 2bit）。
+ *
+ * 1）记录到 currentPrintParams 并落盘（SaveParams，键 PrintParams/bitsPerPixel）；
+ * 2）已加载模型时立刻按新位深重切：切片缓存目录名带 _bppN，
+ *    所以换位深必然走不到旧缓存，不会拿到位深不匹配的 layer_001.bin；
+ * 3）发送端（on_btnStartPrint_clicked）按 previewBpp 选对应的取像素方式，
+ *    最终下发到 FPGA 的仍然是 1bit/喷孔（1024 喷孔 = 128 字节），线格式不受影响。
+ */
+void MainWindow::onPixelFormatChanged(int index)
+{
+    const int bpp = (comboPixelFormat->itemData(index).toInt() == 1) ? 1 : 2;
+    const bool changed = (currentPrintParams.bitsPerPixel != bpp);
+
+    currentPrintParams.bitsPerPixel = bpp;
+    saveParams->savePrintParams(currentPrintParams);
+
+    if (labelPixelFormatHint) {
+        labelPixelFormatHint->setText((bpp == 1)
+            ? "1bit/像素：每行 ceil(宽/8) 字节，像素1=喷；发送端按位直接取 1024 像素，不再做 2bit→喷/不喷 转换。"
+            : "2bit/像素：每行 ceil(宽/4) 字节，像素0=背景、1/2/3=喷印；发送端把非 0 像素转成 1bit 再下发。");
+    }
+    appendLog(QString("位深切换为 %1bit/pixel（%2）")
+              .arg(bpp).arg(bpp == 1 ? "单色，体积减半" : "灰度，兼容原流程"), "blue");
+
+    if (!changed) return;
+    if (currentCliFile.isEmpty()) {
+        appendLog("尚未加载模型，下次打开 CLI 时按新位深切片", "darkCyan");
+        return;
+    }
+    if (cliThread && cliThread->isRunning()) {
+        appendLog("切片正在进行中，本次位深改动将在重新打开 CLI 后生效", "orange");
+        return;
+    }
+    appendLog("按新位深重新切片...", "orange");
+    openCliFile(currentCliFile);   // 缓存名带位深，必然重新切片
 }
 
 
@@ -1847,12 +1910,15 @@ void MainWindow::on_btnStartPrint_clicked()
     for (int o : offs) maxOffset = qMax(maxOffset, o);
 
     // 后处理 .tmp.bin 宽 = 排偏移补0后的行数（每1024行一组，末节不足补0）
-    // 需与 binrowoffset.cpp applyRowOffset2bpp 的 swathRows 默认值(1024)一致。
-    // 注意：不能用 SWATH_ROWS 命名——下方 1904 行已有同名常量(=tmpH 打印发送行数)。
+    // 需与 binrowoffset.cpp applyRowOffsetBin 的 swathRows 默认值(1024)一致。
+    // 注意：不能用 SWATH_ROWS 命名——下方已有同名常量(=tmpH 打印发送行数)。
     const int GROUP_ROWS = 1024;
     const int tmpW = ((previewHeight + GROUP_ROWS - 1) / GROUP_ROWS) * GROUP_ROWS;
     const int tmpH = previewWidth + maxOffset;    // 后处理 .tmp.bin 高 = 原宽 + 416
-    const int tmpRowBytes = (tmpW + 3) / 4;
+    // 源文件位深：1 = 每像素 1bit（ceil(w/8) 字节/行），2 = 每像素 2bit（ceil(w/4) 字节/行）
+    // 与切片时用的位深一致，文件尺寸校验同时就是"缓存位深是否匹配"的兜底检查
+    const int srcBpp      = (previewBpp == 1) ? 1 : 2;
+    const int tmpRowBytes = bin_row_bytes(tmpW, srcBpp);
 
     const QString binPath = m_sliceDir + "/layer_001.tmp.bin";
     QFile f(binPath);
@@ -1864,11 +1930,13 @@ void MainWindow::on_btnStartPrint_clicked()
     const QByteArray src = f.readAll();
     f.close();
     if (src.size() != tmpRowBytes * tmpH) {
-        appendLog(QString("后处理数据尺寸不匹配: 期望 %1 字节, 实际 %2 字节")
-                  .arg(tmpRowBytes * tmpH).arg(src.size()), "red");
+        appendLog(QString("后处理数据尺寸不匹配: 按 %3bit/px 期望 %1 字节, 实际 %2 字节（缓存位深与当前设置不一致，请重新打开 CLI 切片）")
+                  .arg(tmpRowBytes * tmpH).arg(src.size()).arg(srcBpp), "red");
         updatePrintState(IDLE);
         return;
     }
+    appendLog(QString("源数据位深: %1bit/px, 每行 %2 字节, %3 x %4 px")
+              .arg(srcBpp).arg(tmpRowBytes).arg(tmpW).arg(tmpH), "darkCyan");
 
 //    // ===== 按列发送：喷头喷孔沿 X（= .tmp.bin 的行），喷头沿 Y（= .tmp.bin 的列）运动 =====
 //    // 行起点：每条火线从左边的喷孔开始（左 = .tmp.bin 最大行号 dy=tmpH-1），从左往右取 HEAD_PIXELS 行
@@ -1908,7 +1976,8 @@ void MainWindow::on_btnStartPrint_clicked()
     const int SWATH_ROWS  = tmpH;               // 本次发送的行数（从底行到顶行，覆盖全部）
     //const int C0 = (tmpW > 1024) ? (tmpW - 1024) : 0;   // 行宽>1024 时取右侧窗口
     const int C0 = (tmpW > 2048) ? (tmpW - 2048) : 0;    // 去程+回程整体2048像素窗口，右对齐
-    const int lineBytes = (HEAD_PIXELS + 7) / 8;        // 1bpp：1024 像素 = 128 字节/行
+    // ===== 打印数据是 1bit/像素，每行字节数取决于窗口内像素数 =====
+    const int lineBytes = (HEAD_PIXELS + 7) / 8;        // 1bpp：1024 像素 = 128 字节/行（与源文件位深无关）
     m_currentPassPixels = SWATH_ROWS;                   // 供 FIRE 计算 1/2PASS 起止
 
     // ===== 去程数据：从最底行(tmpH-1)向上，x 取右侧窗口 [C0, C0+1023] =====
@@ -1916,12 +1985,15 @@ void MainWindow::on_btnStartPrint_clicked()
         const int dy = tmpH - 1 - k;                    // 从最底行(tmpH-1)向上到顶行(0) → 右下→右上
         QByteArray line(lineBytes, 0);
         char *lp = line.data();
+        // 该行在源 .tmp.bin 里的首字节；位深由 srcBpp 决定，取像素统一走 binformat.h
+        const unsigned char *srcRow =
+            reinterpret_cast<const unsigned char *>(src.constData()) + (size_t)dy * tmpRowBytes;
         for (int r = 0; r < HEAD_PIXELS; ++r) {
             const int dx = (C0 + 1024) + r;                      // 起点靠左，向右取 1024 像素
-            const int srcIdx = dy * tmpRowBytes + dx / 4;
-            const uchar v = (static_cast<uchar>(src.at(srcIdx))
-                             >> (6 - (dx % 4) * 2)) & 0x03;
-            if (v != 0) {                               // 喷印 → 置 1
+            if (dx >= tmpW) continue;                            // 防越界（tmpW 理论上恒 = C0+2048）
+            const uchar v = bin_pixel_get(srcRow, dx, srcBpp);
+            // 2bpp：非 0 即喷（1/2/3 都算）；1bpp：bit=1 即喷。最终都压成 1bit 下发
+            if (bin_pixel_jet(v, srcBpp)) {
                 const int shift = 7 - (r % 8);
                 lp[r / 8] = static_cast<char>(lp[r / 8] | (1 << shift));
             }
@@ -1929,21 +2001,21 @@ void MainWindow::on_btnStartPrint_clicked()
         m_currentLayerData.append(line);
     }
 
-    // ===== 回程数据：从图像顶部(dy=0)开始，x 在去程窗口左边紧挨着向左取 1024 [C0-1024, C0-1]，拼接到去程数据后 =====
+    // ===== 回程数据：从图像顶部(dy=0)开始，x 在去程窗口右边紧挨着取 1024 [C0, C0+1023]，拼接到去程数据后 =====
     for (int k = 0; k < SWATH_ROWS; ++k) {              // 外层=行（回程运动步进）
         const int dy = k;                               // 从顶行(0)向下到底行(tmpH-1) → 回程方向
         QByteArray line(lineBytes, 0);
         char *lp = line.data();
+        const unsigned char *srcRow =
+            reinterpret_cast<const unsigned char *>(src.constData()) + (size_t)dy * tmpRowBytes;
         for (int r = 0; r < HEAD_PIXELS; ++r) {
             //const int dx = C0 - 1 - r;                  // 向左取：去程窗口左边紧挨的 1024 像素
-            // 改后：还是向右取，起点 C0+1024
+            // 改后：还是向右取，起点 C0
             const int dx = C0 + r;     // 去程窗口右边紧挨的 1024
             if (dx >= tmpW) continue;          // 防越界
             if (dx < 0) continue;                       // 防越界
-            const int srcIdx = dy * tmpRowBytes + dx / 4;
-            const uchar v = (static_cast<uchar>(src.at(srcIdx))
-                             >> (6 - (dx % 4) * 2)) & 0x03;
-            if (v != 0) {                               // 喷印 → 置 1
+            const uchar v = bin_pixel_get(srcRow, dx, srcBpp);
+            if (bin_pixel_jet(v, srcBpp)) {              // 喷印 → 置 1
                 const int shift = 7 - (r % 8);
                 lp[r / 8] = static_cast<char>(lp[r / 8] | (1 << shift));
             }
@@ -1958,8 +2030,9 @@ void MainWindow::on_btnStartPrint_clicked()
         m_currentLayerData.append(QByteArray(FX3_ALIGN_BYTES - fx3Rem, 0x00));
 
 
-    appendLog(QString("已提取喷头条带: 去程%1行 + 回程%1行 x %2喷孔, 共 %3 字节")
-              .arg(SWATH_ROWS).arg(HEAD_PIXELS).arg(m_currentLayerData.size()), "blue");
+    appendLog(QString("已提取喷头条带: 去程%1行 + 回程%1行 x %2喷孔, 共 %3 字节（源 %4bit/px → 下发 1bit/px，每线 %5 字节）")
+              .arg(SWATH_ROWS).arg(HEAD_PIXELS).arg(m_currentLayerData.size())
+              .arg(srcBpp).arg(lineBytes), "blue");
 
     m_currentLayerNum = 1;
     int sizeInWords = m_currentLayerData.size() / 4;
@@ -2026,31 +2099,36 @@ void MainWindow::openCliFile(const QString &fileName)   // 第1961行：新函�
 
     // ===== 记住上次打开的CLI文件，下次启动自动打开 =====
     saveParams->saveLastCliFile(fileName);
-    // ===== 切片缓存目录：按文件名+大小命名，避免重复切片 =====
-    // 末尾 _binv3：排偏移改为"每1024行分组、末节补0"后，bin 画布高度已变，
+    // ===== 切片缓存目录：按文件名+大小+DPI+位深命名，避免重复切片、也避免拿到位深不匹配的旧缓存 =====
+    // 末尾 _binv4：位深可切换后，缓存名追加 _bppN（旧 _binv3 缓存不会命中，会重切一次）
     QFileInfo fi(fileName);
     QString cacheDir = QDir::homePath() + "/.cache/BJPrinter/slices/";
     //QString cacheName = fi.completeBaseName() + "_" + QString::number(fi.size());
     QString cacheName = fi.completeBaseName() + "_" + QString::number(fi.size())
-                        + "_dpi" + QString::number(spinDpi->value()) + "_binv3";
+                        + "_dpi" + QString::number(spinDpi->value())
+                        + "_binv4_bpp" + QString::number(currentPrintParams.bitsPerPixel);
     QString sliceDir = cacheDir + cacheName;
 
     // ===== 缓存命中且带元数据 → 直接恢复界面，不用重切 =====
     QDir dir(sliceDir);
     if (dir.exists("layer_001.bin") && dir.exists("meta.txt")) {
-        int layerCount = 0, width = 0, height = 0, rowBytes = 0;
+        int layerCount = 0, width = 0, height = 0, rowBytes = 0, metaBpp = 2;
         int origW = 0, origH = 0, procW = 0, procH = 0;   // ← 新元数据长宽
         QFile metaFile(sliceDir + "/meta.txt");
         if (metaFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
             QTextStream in(&metaFile);
-            in >> layerCount >> width >> height >> rowBytes;
+            in >> layerCount >> width >> height >> rowBytes >> metaBpp;   // 第5个数=位深
             if (!in.atEnd()) in >> origW >> origH >> procW >> procH;   // ← 新增行2
         }
-        if (layerCount > 0 && width > 0 && height > 0) {
-            appendLog("发现切片缓存，直接加载...", "green");
+        // 位深只可能是 1/2；行字节数必须与位深吻合，否则说明元数据坏了 → 重切
+        metaBpp = (metaBpp == 1) ? 1 : 2;
+        const bool metaOk = (layerCount > 0 && width > 0 && height > 0 &&
+                             rowBytes == bin_row_bytes(width, metaBpp));
+        if (metaOk) {
+            appendLog(QString("发现切片缓存，直接加载（%1bit/px）").arg(metaBpp), "green");
             currentCliFile = fileName;
             m_sliceDir = sliceDir;
-            applySliceResult(layerCount, width, height, rowBytes);
+            applySliceResult(layerCount, width, height, rowBytes, metaBpp);
             return;
         }
         // 元数据损坏 → 落到下面重新切片
@@ -2061,7 +2139,8 @@ void MainWindow::openCliFile(const QString &fileName)   // 第1961行：新函�
     appendLog("开始切片...", "blue");
 
     //cliWorker = new CliFillWorker(fileName, sliceDir, currentPrintParams.dpi);   // dpi修改
-    cliWorker = new CliFillWorker(fileName, sliceDir, spinDpi->value());        //  不用先点 "应用打印参数" 也生效
+    cliWorker = new CliFillWorker(fileName, sliceDir, spinDpi->value(),
+                                  currentPrintParams.bitsPerPixel);        //  不用先点 "应用打印参数" 也生效；位深随设置走
 
     cliThread = new QThread;
     cliWorker->moveToThread(cliThread);
@@ -2077,26 +2156,28 @@ void MainWindow::openCliFile(const QString &fileName)   // 第1961行：新函�
 }
 
 // ==================== 切片完成：落盘元数据 + 恢复界面 ====================
-void MainWindow::applySliceResult(int layerCount, int width, int height, int rowBytes)
+void MainWindow::applySliceResult(int layerCount, int width, int height, int rowBytes, int bpp)
 {
     previewLayerCount = layerCount;
     previewWidth      = width;
     previewHeight     = height;
+    previewBpp        = (bpp == 1) ? 1 : 2;   // 预览/发送都按这个位深读 layer_NNN.bin
     currentPreviewLayer = 1;
 
     // 更新界面
-     // 更新界面
-     // 原图 = 原始切片画布 width x height；处理 = 排偏移(每1024行分组,末节补0)+旋转后 procH x (width+416)
+    // 原图 = 原始切片画布 width x height；处理 = 排偏移(每1024行分组,末节补0)+旋转后 procH x (width+416)
      const QVector<int> &offs = xingguangRankOffsets();   // 新增变量块
      int maxOffset = 0;
      for (int o : offs) maxOffset = qMax(maxOffset, o);
-     // 处理宽度 = 补0后的行数：ceil(height/1024)*1024（与 applyRowOffset2bpp 的 swathRows 一致）
+     // 处理宽度 = 补0后的行数：ceil(height/1024)*1024（与 applyRowOffsetBin 的 swathRows 一致）
      const int GROUP_ROWS = 1024;
      const int procW = ((height + GROUP_ROWS - 1) / GROUP_ROWS) * GROUP_ROWS;
-     labelCliFile->setText(QString("模型: %1\n原图: %2 x %3 px\n处理: %4 x %5 px")   // 改写
+     labelCliFile->setText(QString("模型: %1\n原图: %2 x %3 px\n处理: %4 x %5 px\n位深: %6bit/px，每行 %7 字节")   // 改写
                            .arg(QFileInfo(currentCliFile).fileName())
                            .arg(width).arg(height)
-                            .arg(procW).arg(width + maxOffset));
+                            .arg(procW).arg(width + maxOffset)
+                            .arg(previewBpp)
+                            .arg(bin_row_bytes(width, previewBpp)));
 
     labelLayerInfo->setText(QString("层数: %1/%2").arg(1).arg(layerCount));
 
@@ -2107,12 +2188,13 @@ void MainWindow::applySliceResult(int layerCount, int width, int height, int row
     // 显示第 1 层预览
     updatePrintPreview(currentPreviewLayer);
 
-    appendLog(QString("CLI切片完成: %1层，画布%2 x %3像素，每行%4字节")
-              .arg(layerCount).arg(width).arg(height).arg(rowBytes), "green");
+    appendLog(QString("CLI切片完成: %1层，画布%2 x %3像素，每行%4字节，%5bit/pixel")
+              .arg(layerCount).arg(width).arg(height).arg(rowBytes)
+              .arg(previewBpp), "green");
 }
 
 void MainWindow::onCliConversionFinished(int status, int layerCount, int width,
-                                         int height, int rowBytes)
+                                         int height, int rowBytes, int bpp)
 {
     statusBar()->clearMessage();
     btnOpenCli->setEnabled(true);
@@ -2126,10 +2208,10 @@ void MainWindow::onCliConversionFinished(int status, int layerCount, int width,
         return;
     }
     // ===== 把切片元数据落盘，供下次"缓存命中"恢复界面 =====
-    // 格式（纯数字，流式读取，向后兼容旧缓存）：          ← 注释
-    //   layerCount / width / height / rowBytes           ← 注释
-    //   origW origH                                      ← 注释
-    //   procW procH                                      ← 注释
+    // 格式（纯数字，流式读取，向后兼容旧缓存）：
+    //   layerCount / width / height / rowBytes / bpp     ← 第5个是位深（1 或 2）
+    //   origW origH
+    //   procW procH
     int maxOffset = 0;                                    //新增变量块
     const QVector<int> &offs = xingguangRankOffsets();
     for (int o : offs) maxOffset = qMax(maxOffset, o);
@@ -2137,17 +2219,18 @@ void MainWindow::onCliConversionFinished(int status, int layerCount, int width,
     const int GROUP_ROWS = 1024;
     const int procW = ((height + GROUP_ROWS - 1) / GROUP_ROWS) * GROUP_ROWS;
     const int procH = width + maxOffset;   // 高 = 原宽 + 416
+    const int outBpp = (bpp == 1) ? 1 : 2;
 
     QFile meta(m_sliceDir + "/meta.txt");
     if (meta.open(QIODevice::WriteOnly | QIODevice::Text)) {
         QTextStream out(&meta);
-        out << layerCount << "\n" << width << "\n" << height << "\n" << rowBytes << "\n";
+        out << layerCount << "\n" << width << "\n" << height << "\n" << rowBytes << "\n" << outBpp << "\n";
         out << width << " " << height << "\n";            // ← 新增：原图尺寸
         out << procW << " " << procH << "\n";             // ← 新增：处理后尺寸
     }
 
 
-    applySliceResult(layerCount, width, height, rowBytes);
+    applySliceResult(layerCount, width, height, rowBytes, outBpp);
 }
 
 void MainWindow::on_btnPreviousLayer_clicked()
@@ -2448,23 +2531,28 @@ void MainWindow::updatePrintPreview(int layer)
     const int imageHeight = qMax(1, qRound(previewHeight * scale));
     QImage image(imageWidth, imageHeight, QImage::Format_Grayscale8);
     image.fill(255);
-    const int expectedSize = ((previewWidth + 3) / 4) * previewHeight;
+    const int bpp = (previewBpp == 1) ? 1 : 2;
+    const int rowBytes = bin_row_bytes(previewWidth, bpp);       // 1bpp=ceil(w/8)，2bpp=ceil(w/4)
+    const int expectedSize = rowBytes * previewHeight;
     if (previewWidth <= 0 || previewHeight <= 0 ||
         !binFile.open(QIODevice::ReadOnly) || binFile.size() != expectedSize) {
-        appendLog(QString("无法加载第%1层预览").arg(layer), "red");
+        appendLog(QString("无法加载第%1层预览（期望 %2 x %3 px, %4bit/px = %5 字节）")
+                  .arg(layer).arg(previewWidth).arg(previewHeight).arg(bpp).arg(expectedSize), "red");
         return;
     }
     const QByteArray data = binFile.read(expectedSize);
-    const int rowBytes = (previewWidth + 3) / 4;
     for (int y = 0; y < imageHeight; ++y) {
         const int sourceRow = qMin(previewHeight - 1,
                                    qRound(y / scale));
         uchar *destination = image.scanLine(imageHeight - y - 1);
+        const unsigned char *srcRow = reinterpret_cast<const unsigned char *>(data.constData())
+                                      + (size_t)sourceRow * rowBytes;
         for (int x = 0; x < imageWidth; ++x) {
             const int sourceX = qMin(previewWidth - 1, qRound(x / scale));
-            const uchar value = (static_cast<uchar>(data.at(sourceRow * rowBytes + sourceX / 4))
-                                 >> (6 - (sourceX % 4) * 2)) & 0x03;
-            destination[x] = value == 0 ? 255 : static_cast<uchar>(255 - value * 70);
+            const uchar value = bin_pixel_get(srcRow, sourceX, bpp);
+            destination[x] = (bpp == 1)
+                             ? (value ? 0 : 255)                       // 1bpp：喷=黑
+                             : (value == 0 ? 255 : static_cast<uchar>(255 - value * 70));
         }
     }
     // [开发用] 同目录导出一份可双击预览的 PNG，后期可删

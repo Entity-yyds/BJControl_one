@@ -224,10 +224,12 @@ private slots:
     void on_btnPreviousLayer_clicked();
     void on_btnNextLayer_clicked();
     void onCliConversionFinished(int status, int layerCount, int width,
-                                 int height, int rowBytes);
+                                 int height, int rowBytes, int bpp);
 
     // 应用打印参数
     void on_btnApplyPrintParams_clicked();
+    // 位深开关：1bit/pixel（单色）<-> 2bit/pixel（灰度）
+    void onPixelFormatChanged(int index);
     // ========== 波形控制 ==========
     /**
      * @brief 应用波形参数槽函数
@@ -458,6 +460,7 @@ private:
     int previewLayerCount;
     int previewWidth;
     int previewHeight;
+    int previewBpp;          // 当前切片缓存的每像素位数（1 或 2），必须与 meta.txt 一致
     QThread *cliThread;
     CliFillWorker *cliWorker;
 
@@ -482,6 +485,8 @@ private:
     QList<QSpinBox*> spinOverlap;     /** @brief 重叠孔输入框（N-1 个） */
     QList<QLabel*> m_lrLabels;        /** @brief 接缝行标签（N-1 个） */
     QSpinBox *spinPassCount;              /** @brief pass 数 */
+    QComboBox *comboPixelFormat;          /** @brief 位深开关：1bit/pixel 或 2bit/pixel */
+    QLabel *labelPixelFormatHint;         /** @brief 位深说明（每行字节数/发送处理方式） */
     QGridLayout *bidirectionalGrid;       /** @brief 双向值动态行布局 */
     QLabel *labelBINone;                  /** @brief 单 pass 提示 */
     QList<QSpinBox*> spinBidirectional;   /** @brief 双向值输入框（pass数-1 个） */
@@ -735,7 +740,7 @@ private:
     void sendQueryCmd();           // 发送查询指令
     void parseQueryResponse(const QByteArray &data);  // 解析查询回复
     void sendFireCmd();   // 发送点火指令（预留）
-    void applySliceResult(int layerCount, int width, int height, int rowBytes);   // 统一恢复切片预览界面
+    void applySliceResult(int layerCount, int width, int height, int rowBytes, int bpp);   // 统一恢复切片预览界面
     void openCliFile(const QString &fileName);   // 打开并切片CLI文件（按钮和自动加载共用），会保存路径到配置
 
 public slots:
