@@ -6,5 +6,13 @@
 解释当前工程
 CliFillWorker::run 启动cli 工作线程进切片及数据处理
 
+cli_fill2_convert cli 文件处理成单层.bin文件
+
+process_layer 收集边-填充-保存
+
+fill_edges 扫描线多边形填充核心算法
+
+img_fill_span 填充一段连续像素
+
 postProcessLayerBin 对单层.bin做星光喷头后处理
 包括：排偏移 和 旋转

@@ -34,7 +34,7 @@ static int    G_bpp   = 2;
 /* 全局包围盒：运行时从所有层的所有顶点扫描得到，初始化为极端值 */
 static double G_xmin =  1e30, G_xmax = -1e30;
 static double G_ymin =  1e30, G_ymax = -1e30;
-/* 每毫米像素数 = DPI / 25.4（1 英寸 = 25.4 mm） */
+/* 每毫米像素数 = DPI / 25.4（1 英寸 = 25.4 mm） */  // 运算结果是 每mm有多少个像素点
 #define PX_PER_MM  (G_dpi / 25.4)
 /* 画布宽高（像素）：物理尺寸 × 像素密度，+1 保证边界像素不被裁掉 */
 #define G_WIDTH    ((int)ceil((G_xmax - G_xmin) * PX_PER_MM) + 1)
@@ -90,23 +90,26 @@ static inline void img_setpixel(BitImage *img, int x, int y, unsigned char val)
  *   1bpp：8 像素 = 1 字节，整字节填充值 = 全 1(0xFF) 或全 0(0x00)
  *   2bpp：4 像素 = 1 字节，整字节填充值 = val * 0x55（每 2bit 复制一遍）
  */
-static void img_fill_span(BitImage *img, int x0, int x1, int y, unsigned char val)
+static void img_fill_span(BitImage *img, int x0, int x1, int y, unsigned char val)      // 当前填充固定传 `0x01`
 {
     const int bpp     = img->bpp;
-    const int px_per  = (bpp == BIN_BPP_1) ? 8 : 4;
-    const int px_mask = px_per - 1;
+    const int px_per  = (bpp == BIN_BPP_1) ? 8 : 4;         // 一个字节装几个像素，1bpp 是 8，2bpp 是 4
+    const int px_mask = px_per - 1;                         // 用来判 "x 是否落在字节边界上
     const unsigned char packed = (bpp == BIN_BPP_1)
         ? (unsigned char)(val ? 0xFF : 0x00)
-        : (unsigned char)((val & 0x03) * 0x55);
-    unsigned char *row = img->data + (size_t)y * img->row_bytes;
+        : (unsigned char)((val & 0x03) * 0x55);             // 2^6 + 2^4 + 2^2 + 2^0 = 0x55
+    unsigned char *row = img->data + (size_t)y * img->row_bytes;        // 按 `row_bytes` 定位这一行的首字节
 
-    while (x0 <= x1 && (x0 & px_mask)) img_setpixel(img, x0++, y, val);
+    while (x0 <= x1 && (x0 & px_mask))                      // 从 `x0` 开始逐像素写，直到 `x0` 落在字节边界上  字节对齐
+    {
+        img_setpixel(img, x0++, y, val);
+    }
     if (x0 <= x1) {
-        int full_bytes = (x1 - x0 + 1) / px_per;
+        int full_bytes = (x1 - x0 + 1) / px_per;            // 还能整字节覆盖多少个字节
         if (full_bytes > 0) {
             memset(row + x0 / px_per, packed, (size_t)full_bytes);
             x0 += full_bytes * px_per;
-        }
+        }                                                   // 因为 `x0` 已对齐，`x0/px_per` 是整除 剩下的不足一字节的尾巴（最多 7 个像素 / 3 个像素）逐点
     }
     while (x0 <= x1) img_setpixel(img, x0++, y, val);
 }
@@ -144,7 +147,7 @@ static int compare_double(const void *a, const void *b)
  *        因此内孔（洞）会被自动跳过，无需单独判断内外轮廓。
  *
  * 【注意】
- *   - 交点数组 xs[4096] 是固定上限，极端复杂层可能溢出（cnt 被截断）
+ *   - 交点数组 xs[4096] 是固定上限，极端复杂层可能溢出（cnt 被截断） 已修改
  *   - 用冒泡排序，交点数小时性能可接受；大规模建议换 qsort
  *   - 水平边（y1==y2）不会被选中（(y1>scan_y)!=(y2>scan_y) 为 false），
  *     这是正确的，因为水平边不影响扫描线交点
@@ -152,37 +155,44 @@ static int compare_double(const void *a, const void *b)
 
 static void fill_edges(BitImage *img, const Edge *edges, int edge_count, unsigned char val)
 {
-    double min_y = edges[0].y1, max_y = edges[0].y1;
+    double min_y = edges[0].y1, max_y = edges[0].y1;        // `min_y` / `max_y` 用 `edges[0].y1` 初始化，然后遍历每条边的两个端点取极值 求出本层的Y范围 因为往往图形只占画布的一小部分
     for (int e = 0; e < edge_count; ++e) {
         if (edges[e].y1 < min_y) min_y = edges[e].y1;
         if (edges[e].y2 < min_y) min_y = edges[e].y2;
         if (edges[e].y1 > max_y) max_y = edges[e].y1;
         if (edges[e].y2 > max_y) max_y = edges[e].y2;
     }
-    int first_row = phys_to_row(min_y);
-    int last_row = phys_to_row(max_y);
+    int first_row = phys_to_row(min_y);                 // 算出最小值离y 下边界 有多少个像素点 得出像素行好
+    int last_row = phys_to_row(max_y);                  // 算出最大值离y 上边界 有多少个像素点
     if (first_row < 0) first_row = 0;
     if (last_row >= img->height) last_row = img->height - 1;
 
-    double *xs = malloc((size_t)edge_count * sizeof(double));
+    double *xs = malloc((size_t)edge_count * sizeof(double));       // 一次性分配交点数组 因为**一条边和一条扫描线最多只有一个交点**，所以 `cnt <= edge_count` 一定成立
     if (!xs) return;
+    /*
+     *一行像素实际占据的 y 区间是 `[G_ymin + row/PX, G_ymin + (row+1)/PX]`，
+     *如果直接拿行的下边界当扫描线高度，那么 "顶点正好落在像素边界上" 时，
+     *这个像素算不算被覆盖就有歧义 —— 不同实现会给出不同结果，
+     *同一份 CLI 在不同软件里会差一像素。
+     *取像素中心（`row + 0.5`）就把归属问题变成 "交点在不在这一行的中间"，语义上唯一
+     */
     for (int row = first_row; row <= last_row; row++) { /* 扫描线取像素中心高度，避免边界像素的歧义 */
-        double scan_y = G_ymin + (row + 0.5) / PX_PER_MM;  /* 像素中心 */
+        double scan_y = G_ymin + (row + 0.5) / PX_PER_MM;  /* 像素中心 */   // (row + 0.5) / PX_PER_MM 这个运行结果 当前像素行号 + 0.5 / 每mm多少个点 =  具体 有多少个mm
         int cnt = 0;
 		/* 第一步：求扫描线与所有边的交点 */
         for (int e = 0; e < edge_count; e++) {
             double y1 = edges[e].y1, y2 = edges[e].y2;
-            if ((y1 > scan_y) != (y2 > scan_y)) {
+            if ((y1 > scan_y) != (y2 > scan_y)) {                           // 两个端点是否分居扫描线两侧
                 double x1 = edges[e].x1, x2 = edges[e].x2;
-                double xi = x1 + (scan_y - y1) * (x2 - x1) / (y2 - y1);
+                double xi = x1 + (scan_y - y1) * (x2 - x1) / (y2 - y1);     // 线性插值公式
                 xs[cnt++] = xi;
             }
         }
 
-        qsort(xs, (size_t)cnt, sizeof(double), compare_double);
+        qsort(xs, (size_t)cnt, sizeof(double), compare_double);             // `compare_double` 是 `(da > db) - (da < db)` 的写法 —— 返回 -1/0/1
 
         /* 奇偶段填充：0-1, 2-3, 4-5 ... */
-        for (int k = 0; k + 1 < cnt; k += 2) {
+        for (int k = 0; k + 1 < cnt; k += 2) {                              // `k + 1 < cnt` 保证只处理成对的交点，`cnt` 为奇数时最后一个丢掉
             int c0 = phys_to_col(xs[k]);
             int c1 = phys_to_col(xs[k + 1]);
             if (c0 < 0) c0 = 0;
