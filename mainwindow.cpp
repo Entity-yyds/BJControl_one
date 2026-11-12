@@ -27,7 +27,40 @@
 #include <QGraphicsView>       // ← 如果还没有的话也加上
 #include <QProcess>
 #include <QVector>
+#include <QResizeEvent>
 #include "binrowoffset.h"
+
+
+// ===== 预览视图：视口尺寸一变就重新按整幅适配 =====
+// 原因：updatePrintPreview() 在 MainWindow 构造函数里就被调用（启动自动打开上次 CLI），
+// 此时 QGraphicsView 还没被布局撑开，fitInView 按默认 sizeHint（约 256x192）算出的
+// 缩放比例会被“写死”，窗口展开后图就一直很小。这里在 resizeEvent 里重算。
+namespace {
+class FitPreviewView : public QGraphicsView
+{
+public:
+    explicit FitPreviewView(QGraphicsScene *scene, QWidget *parent = nullptr)
+        : QGraphicsView(scene, parent)
+    {
+        setRenderHint(QPainter::SmoothPixmapTransform, true);   // 缩小后不出锯齿
+        setAlignment(Qt::AlignCenter);                          // 居中
+        setTransformationAnchor(QGraphicsView::AnchorViewCenter);
+        setResizeAnchor(QGraphicsView::AnchorViewCenter);
+        // 永远整幅适配，不需要滚动条；关掉可避免 fitInView 反复触发 resize
+        setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    }
+
+protected:
+    void resizeEvent(QResizeEvent *e) override
+    {
+        QGraphicsView::resizeEvent(e);
+        const QRectF r = scene() ? scene()->sceneRect() : QRectF();
+        if (r.isValid() && r.width() > 0 && r.height() > 0)
+            fitInView(r, Qt::KeepAspectRatio);
+    }
+};
+} // namespace
 
 
 extern "C" {
@@ -638,7 +671,8 @@ void MainWindow::createControlTab()
     QVBoxLayout *previewLayout = new QVBoxLayout(previewGroup);
 
     printScene = new QGraphicsScene(this);
-    printPreview = new QGraphicsView(printScene, this);
+    //printPreview = new QGraphicsView(printScene, this);
+    printPreview = new FitPreviewView(printScene, this);
     printPreview->setMinimumHeight(300);
     printPreview->setBackgroundBrush(QBrush(Qt::white));
     previewLayout->addWidget(printPreview);
@@ -786,7 +820,7 @@ void MainWindow::createNegativePressureTab()
     cyclicLayout->addWidget(lcdCyclicCurrent, 1, 1, 1, 2);
     channelsLayout->addWidget(cyclicGroup);
 
-    mainLayout->addLayout(channelsLayout);
+    //mainLayout->addLayout(channelsLayout);
     mainLayout->addLayout(channelsLayout);
 
     // ===== 二级压墨 + 复位控制 =====
@@ -1920,7 +1954,7 @@ void MainWindow::on_btnStartPrint_clicked()
     const int srcBpp      = (previewBpp == 1) ? 1 : 2;
     const int tmpRowBytes = bin_row_bytes(tmpW, srcBpp);
 
-    const QString binPath = m_sliceDir + "/layer_001.tmp.bin";
+    const QString binPath = m_sliceDir + "/layer_001_tmp.bin";
     QFile f(binPath);
     if (!f.open(QIODevice::ReadOnly)) {
         appendLog("无法打开后处理数据: " + binPath, "red");

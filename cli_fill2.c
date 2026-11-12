@@ -824,6 +824,7 @@ int cli_fill2_convert(const char *input_path, const char *outdir, double dpi,
     for (i = 0; i < doc.n_layers; ++i) {
         int layer_status = process_layer(&doc.layers[i], output_layer + 1, outdir);     // **产出编号是压缩的**：第 1、2 层都为空，第 3 层成功，它会写成 `layer_001.bin`
         if (layer_status < 0) {
+
             cli_free(&doc);
             return -4;
         }

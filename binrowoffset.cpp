@@ -51,7 +51,7 @@ bool applyRowOffsetBin(const QByteArray &src, int width, int height, int srcRowB
     // 默认 swathRows=1024 = 8排×128孔 = 喷头一整幅。
     // 每一节内部：该节全部行按 排号(0..7) 聚成 8 个连续块，
     // 块序反排：偏移0 的块放本组最底部，偏移24 在其上，……偏移416 放最顶部
-    // （即从上到下 = 416,392,328,306,112,88,24,0），块内保持原行号从小到大。
+    // （即从上到下 = 416,392,328,306,112,88,24,0），块内保持原行号从小到大。 改：块内顺序：每排 128 孔整体反向
     // 输出总行数 = ceil(height/swathRows)*swathRows，末节多出的行 = 背景(0)。
     const int swathCount = (height + swathRows - 1) / swathRows;
     const int outHeight  = swathCount * swathRows;
@@ -71,11 +71,16 @@ bool applyRowOffsetBin(const QByteArray &src, int width, int height, int srcRowB
         //    于是 偏移0(rank0) 落在本组最底部，偏移416(rank7) 落在最顶部。
         int groupStart[8];
         int acc = s * swathRows;
-        for (int g = 0; g < rankCount; ++g) { groupStart[rankCount - 1 - g] = acc; acc += cnt[g]; }
+        for (int g = 0; g < rankCount; ++g)
+        {
+            groupStart[rankCount - 1 - g] = acc;
+            acc += cnt[g];
+        }
 
-        // 3) 逐行放入所属排的块内空位
+        // 3) 逐行放入所属排的块内空位 改 从块尾往前放 → 单排 128 孔顺序反转）
         int cursor[8];
-        for (int g = 0; g < rankCount; ++g) cursor[g] = groupStart[g];
+        //for (int g = 0; g < rankCount; ++g) cursor[g] = groupStart[g];
+        for (int g = 0; g < rankCount; ++g) cursor[g] = groupStart[g] + cnt[g] - 1;
 
         for (int local = 0; local < swathRows; ++local) {
             const int gRow = s * swathRows + local;   // 全局源行号
@@ -84,9 +89,10 @@ bool applyRowOffsetBin(const QByteArray &src, int width, int height, int srcRowB
             const int rank    = rankOfResidue[residue];
             const int off     = rankOffsets[rank];    // 这排的偏移像素数
             const int srcRow  = gRow * srcRowBytes;   // 源行在src里的字节起点
-            const int dstRow  = cursor[rank]++;       // 目标行 = 该排连续块下一个空位
+            //const int dstRow  = cursor[rank]++;       // 目标行 = 该排连续块下一个空位
+            const int dstRow  = cursor[rank]--;       // 目标行：块内从尾向头取空位（128 孔顺序反转）
 
-            // 直接拿指针做整行搬运：省掉 QByteArray::at() 的每次边界检查
+            // 直接拿指针做整行搬运：省掉 QByteArray::at() 的每次边界检查z
             const uchar *srcRowPtr = reinterpret_cast<const uchar *>(src.constData()) + srcRow;
             uchar *dstRowPtr = reinterpret_cast<uchar *>(raw) + dstRow * outRowBytes;
 
