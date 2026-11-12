@@ -704,7 +704,7 @@ static int save_bmp_preview(const char *path, const BitImage *img)
 }
 
 /* ===================================================================
- *  统计喷印像素（1bpp 看 bit，2bpp 看 v!=0）
+ *  统计喷印像素（1bpp 看 bit，2bpp 看 v!=0） 空层直接跳过
  * =================================================================== */
 static int count_spray(const BitImage *img)
 {
