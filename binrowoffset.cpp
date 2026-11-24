@@ -4,6 +4,7 @@
 const QVector<int>& xingguangRankOffsets()
 {
     static const QVector<int> offs = {0, 24, 88, 112, 306, 328, 392, 416};
+    //static const QVector<int> offs = {88, 0, 304, 392, 112, 24, 328, 416};
     return offs;
 }
 /*
@@ -40,12 +41,21 @@ bool applyRowOffsetBin(const QByteArray &src, int width, int height, int srcRowB
     const int rankCount = rankOffsets.size();   // = 8
     // ===== 真实喷孔→排映射（替代原来的 row%8 占位）=====
     // 喷孔号 % 8 决定属于哪一排（每排128孔、间隔8）。
-    // 依据：排1=8,16..1024(≡0)  排2=4(≡4)  排3=7(≡7)  排4=3(≡3)
-    //       排5=5(≡5)  排6=1(≡1)  排7=6(≡6)  排8=2(≡2)
-    static const int rankOfResidue[8] = {0, 5, 7, 3, 1, 4, 6, 2}; // 余数→排号(0基) 喷孔号余数对应数组中第几排
+    // 原// 依据：排1=8,16..1024(≡0)  排2=4(≡4)  排3=7(≡7)  排4=3(≡3)
+    // 原//       排5=5(≡5)  排6=1(≡1)  排7=6(≡6)  排8=2(≡2)
+    // static const int rankOfResidue[8] = {0, 5, 7, 3, 1, 4, 6, 2}; // 余数→排号(0基) 喷孔号余数对应数组中第几排
+
+    // 新
+    // 依据（实测）：排1=2,10..1018(≡2)  排2=6,14..1022(≡6)  排3=1,9..1017(≡1)
+    //   排4=5,13..1021(≡5)  排5=3,11..1019(≡3)  排6=7,15..1023(≡7)
+    //   排7=4,12..1020(≡4)  排8=8,16..1024(≡0)
+    //static const int rankOfResidue[8] = {7, 2, 0, 4, 6, 3, 1, 5};   // 余数→排号(0基) 喷孔号余数对应数组中第几排
+    //static const int rankOfResidue[8] = {7, 3, 6, 2, 4, 0, 5, 1};   // 余数→排号(0基) 喷孔号余数对应数组中第几排
+    //static const int rankOfResidue[8] = { 0, 1, 2, 3, 4, 5, 6, 7};   // 余数→排号(0基) 喷孔号余数对应数组中第几排
+    static const int rankOfResidue[8] = {7, 5, 1, 3, 6, 4, 0, 2};
     // 行号与喷孔号的对应：喷孔号是1基(1..1024)。若 .bin 第0行 = 喷孔1 → residueShift=1；
     // 若第0行 = 喷孔0 → residueShift=0。默认按"第0行=喷孔1"。跑图后若第一排对不上，改这个值。
-    const int residueShift = 1;
+    const int residueShift = 0;
 
     // ===== 每 swathRows 行一节，节内按偏移分组重排；末节不足补0 =====
     // 默认 swathRows=1024 = 8排×128孔 = 喷头一整幅。

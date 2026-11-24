@@ -609,7 +609,7 @@ static void compute_bbox(const CLI_Doc *doc)
         }
     }
     /* 留 1 像素余量 */ /* 四周留 1 像素余量，避免边界上的顶点被裁掉 */
-    double pad = 1.0 / PX_PER_MM;
+    double pad = 0.0 / PX_PER_MM;
     G_xmin -= pad; G_xmax += pad;
     G_ymin -= pad; G_ymax += pad;
 }
