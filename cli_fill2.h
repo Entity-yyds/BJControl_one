@@ -10,7 +10,7 @@ typedef struct {
     int width;
     int height;
     int row_bytes;
-    int bits_per_pixel;   /* 本次生成的 .bin 每像素位数：1 或 2 */
+    int bits_per_pixel;   /* beng次生成的 .bin 每像素位数：1 或 2 */
     double x_min;
     double x_max;
     double y_min;
